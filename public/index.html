@@ -3,13 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Moneybot2 Agent Stream</title>
+    <title>Moneybot2 Agent</title>
     <style>
       body {
         font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
         margin: 16px;
         background: #0b1020;
         color: #e8eefc;
+      }
+      h2 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 8px 0;
+        opacity: 0.9;
       }
       .row {
         display: flex;
@@ -29,13 +35,42 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
-      #log {
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 960px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+      .panel {
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 12px;
         padding: 12px;
-        height: 70vh;
-        overflow: auto;
         background: rgba(255, 255, 255, 0.03);
+      }
+      .hint {
+        font-size: 13px;
+        opacity: 0.85;
+        margin-bottom: 10px;
+        line-height: 1.45;
+      }
+      #vncFrame {
+        width: 100%;
+        height: min(68vh, 780px);
+        border: 0;
+        border-radius: 8px;
+        background: #000;
+      }
+      #log {
+        height: min(68vh, 780px);
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 8px;
+        padding: 8px;
       }
       .entry {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -52,20 +87,57 @@
       .type {
         font-weight: 700;
       }
+      a.open-tab {
+        color: #7eb8ff;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
     <div class="row">
-      <div>Microworkers automation stream</div>
-      <div style="flex:1"></div>
+      <div>Microworkers agent — live desktop + event log</div>
+      <div style="flex: 1"></div>
       <button id="resumeBtn" disabled>Resume</button>
     </div>
 
-    <div id="log"></div>
+    <div class="layout">
+      <div class="panel">
+        <h2>Live browser</h2>
+        <p class="hint" id="vncHint">Checking whether noVNC is available…</p>
+        <a class="open-tab" id="vncOpenTab" href="#" style="display: none" target="_blank" rel="noopener">Open desktop in new tab</a>
+        <iframe id="vncFrame" title="noVNC" style="display: none"></iframe>
+      </div>
+      <div class="panel">
+        <h2>Event stream</h2>
+        <div id="log"></div>
+      </div>
+    </div>
 
     <script>
       const logEl = document.getElementById("log");
       const resumeBtn = document.getElementById("resumeBtn");
+      const vncHint = document.getElementById("vncHint");
+      const vncFrame = document.getElementById("vncFrame");
+      const vncOpenTab = document.getElementById("vncOpenTab");
+
+      fetch("/vnc-status")
+        .then((r) => r.json())
+        .then((s) => {
+          if (s.enabled && s.viewerPath) {
+            vncHint.textContent =
+              "This is the real Chromium session the bot uses (when ENABLE_VNC=true on the server). Use it to complete Cloudflare, captchas, or manual login.";
+            vncFrame.src = s.viewerPath;
+            vncFrame.style.display = "block";
+            vncOpenTab.href = s.viewerPath;
+            vncOpenTab.style.display = "inline-block";
+          } else {
+            vncHint.innerHTML =
+              "<strong>Live desktop is off.</strong> On Railway add <code>ENABLE_VNC=true</code>, redeploy, then reload this page. Without it you only get the text log (Railway exposes one public port — the desktop is proxied here at <code>/novnc/</code>).";
+          }
+        })
+        .catch(() => {
+          vncHint.textContent = "Could not load /vnc-status — check that the server is running.";
+        });
 
       function addEntry(event) {
         const div = document.createElement("div");
@@ -95,7 +167,6 @@
           .replaceAll("'", "&#039;");
       }
 
-      let manualPauseActive = false;
       const es = new EventSource("/events");
       es.onmessage = (m) => {
         let payload;
@@ -107,20 +178,17 @@
         addEntry(payload);
 
         if (payload?.type === "MANUAL_PAUSE" || payload?.type === "MANUAL_RESUME") {
-          manualPauseActive = payload?.type === "MANUAL_PAUSE";
-          resumeBtn.disabled = !manualPauseActive;
+          resumeBtn.disabled = payload?.type !== "MANUAL_PAUSE";
         }
       };
-    es.onerror = () => {
-      addEntry({ type: "SSE_ERROR", label: "Disconnected from event stream. Check server logs and reload." });
-    };
+      es.onerror = () => {
+        addEntry({ type: "SSE_ERROR", label: "Disconnected from event stream. Check server logs and reload." });
+      };
 
       resumeBtn.addEventListener("click", async () => {
         resumeBtn.disabled = true;
-        manualPauseActive = false;
         await fetch("/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       });
     </script>
   </body>
 </html>
-

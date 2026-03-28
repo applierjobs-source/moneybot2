@@ -6,6 +6,7 @@ const { textLooksLikePhoneTask, formLooksLikePhoneTask } = require("./phoneFilte
 const { clickIfExists, trimText } = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
+const { emitLoginAnalysis } = require("./loginDiagnostics");
 
 function emit(bus, event) {
   bus.emit("event", event);
@@ -334,6 +335,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
     if (!(await detectLoggedIn(page))) {
       emit(bus, { type: "LOGIN_NOT_CONFIRMED", label: "Login not confirmed." });
       await emitPageDiagnostics(bus, page, "login not confirmed");
+      await emitLoginAnalysis(bus, page, "login not confirmed");
       if (cfg.SAFE_MANUAL_PAUSE) {
         emit(bus, { type: "MANUAL_PAUSE", label: "Complete login in the browser, then click Resume." });
         await manualGate.waitForResume();
@@ -342,12 +344,15 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
           await page.waitForTimeout(3000);
           if (await detectLoggedIn(page)) break;
           emit(bus, { type: "LOGIN_RECHECK", label: `Recheck login attempt ${i + 1}/5` });
+          await trySolveCaptchasOnPage(page, cfg, bus, `login recheck ${i + 1}`);
+          await emitLoginAnalysis(bus, page, `login recheck ${i + 1}`);
         }
         if (!(await detectLoggedIn(page))) {
+          await emitLoginAnalysis(bus, page, "login final");
           emit(bus, {
             type: "LOGIN_FAILED",
             label:
-              "Still not logged in. Set MICROWORKERS_BASE_URL=https://www.microworkers.com. Add CAPSOLVER_API_KEY for widget captchas; for Cloudflare interstitial add CAPSOLVER_CLOUDFLARE_PROXY or use ENABLE_VNC / SAFE_MANUAL_PAUSE.",
+              "Still not logged in. Read LOGIN_ANALYSIS, LOGIN_STATE, and PAGE_SNIPPET above. Set MICROWORKERS_BASE_URL=https://www.microworkers.com, CAPSOLVER_API_KEY for widgets, CAPSOLVER_CLOUDFLARE_PROXY for CF interstitial, or ENABLE_VNC=true and use the Live browser panel on this site.",
           });
           return;
         }

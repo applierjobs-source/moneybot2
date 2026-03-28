@@ -68,10 +68,11 @@ Using third-party captcha-solving services may **violate the terms** of the site
 
 ## Railway: realtime virtual display (noVNC)
 
-Railway containers don’t have a real desktop, so “headful” needs a virtual display.
-This repo can optionally expose a live browser view using **noVNC**.
+Railway usually gives **one** public URL (your app port). noVNC still listens on **6080 inside the container**, but the dashboard **proxies** it so you don’t need a second port.
 
-1. Set `ENABLE_VNC=true` in Railway environment variables.
-2. Ensure the Railway service exposes port `6080` (the noVNC web port).
-3. Open the Railway service URL for `6080` and watch the headed browser live.
+1. Set **`ENABLE_VNC=true`** on Railway and redeploy.
+2. Open your normal app URL (e.g. `https://moneybot2-production.up.railway.app`).
+3. Use the **Live browser** panel (iframe to `/novnc/…`) or **Open desktop in new tab**.
+
+Login failures also emit **`LOGIN_ANALYSIS`**, **`LOGIN_STATE`**, and **`PAGE_SNIPPET`** so the log explains what the page looked like (Cloudflare vs captcha vs still on login form), not only a generic `LOGIN_FAILED` line.
 

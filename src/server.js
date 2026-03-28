@@ -1,13 +1,25 @@
 const path = require("path");
+const http = require("http");
 const express = require("express");
+const httpProxy = require("http-proxy");
 
 function createServer({ bus, manualGate, port }) {
   const app = express();
+  const vncEnabled = process.env.ENABLE_VNC === "true";
 
   app.use(express.json({ limit: "1mb" }));
   app.use(express.static(path.join(__dirname, "..", "public")));
 
   app.get("/healthz", (req, res) => res.status(200).json({ ok: true }));
+
+  app.get("/vnc-status", (req, res) => {
+    res.json({
+      enabled: vncEnabled,
+      viewerPath: vncEnabled
+        ? "/novnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&reconnect_delay=3000&path=novnc%2Fwebsockify"
+        : null,
+    });
+  });
 
   app.post("/resume", (req, res) => {
     manualGate.resume();
@@ -20,7 +32,6 @@ function createServer({ bus, manualGate, port }) {
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
 
-    // Flush headers so client starts receiving immediately.
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     res.write(`data: ${JSON.stringify({ type: "CONNECTED" })}\n\n`);
@@ -35,14 +46,42 @@ function createServer({ bus, manualGate, port }) {
     });
   });
 
-  const server = app.listen(port, () => {
-    // This log goes to terminal; UI will show streamed events.
+  let novncProxy;
+  if (vncEnabled) {
+    novncProxy = httpProxy.createProxyServer({
+      target: "http://127.0.0.1:6080",
+      changeOrigin: true,
+    });
+    // Express strips mount prefix: browser /novnc/vnc.html → req.url /vnc.html here
+    app.use("/novnc", (req, res) => {
+      novncProxy.web(req, res, (err) => {
+        if (!res.headersSent) {
+          res
+            .status(502)
+            .type("text/plain")
+            .send("noVNC proxy error (is Xvfb/noVNC up on 6080? Check container logs.)");
+        }
+      });
+    });
+  }
+
+  const server = http.createServer(app);
+
+  if (vncEnabled && novncProxy) {
+    server.on("upgrade", (req, socket, head) => {
+      if (!req.url || !req.url.startsWith("/novnc/")) return;
+      const stripped = req.url.slice("/novnc".length) || "/";
+      req.url = stripped;
+      novncProxy.ws(req, socket, head);
+    });
+  }
+
+  server.listen(port, () => {
     // eslint-disable-next-line no-console
-    console.log(`Server listening on http://localhost:${port}`);
+    console.log(`Server listening on http://localhost:${port}${vncEnabled ? " (noVNC proxied at /novnc/)" : ""}`);
   });
 
   return server;
 }
 
 module.exports = { createServer };
-
