@@ -2,7 +2,7 @@ const fs = require("fs");
 const { z } = require("zod");
 
 const EnvSchema = z.object({
-  MICROWORKERS_BASE_URL: z.string().url().default("https://microworkers.com"),
+  MICROWORKERS_BASE_URL: z.string().url().default("https://www.microworkers.com"),
   MICROWORKERS_USERNAME: z.string().min(1).optional(),
   MICROWORKERS_PASSWORD: z.string().min(1).optional(),
 

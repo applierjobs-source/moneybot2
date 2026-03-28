@@ -18,13 +18,14 @@ async function main() {
 
   bus.emit("event", { type: "UI_READY", label: "Open dashboard in your browser and watch events." });
 
-  // Start automation (keeps running).
-  await runMicroworkersAutomation({ bus, manualGate, cfg });
+  try {
+    await runMicroworkersAutomation({ bus, manualGate, cfg });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(err);
+    bus.emit("event", { type: "ERROR", label: `Fatal: ${err?.message || String(err)}` });
+  }
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err);
-  process.exit(1);
-});
+main();
 

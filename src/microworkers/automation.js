@@ -10,6 +10,39 @@ function emit(bus, event) {
   bus.emit("event", event);
 }
 
+function baseUrlVariants(baseUrl) {
+  const trimmed = String(baseUrl || "").replace(/\/$/, "");
+  const out = new Set([trimmed]);
+  try {
+    const u = new URL(trimmed);
+    const host = u.hostname.toLowerCase();
+    if (host === "microworkers.com") {
+      out.add(`${u.protocol}//www.microworkers.com`);
+    }
+    if (host === "www.microworkers.com") {
+      out.add(`${u.protocol}//microworkers.com`);
+    }
+  } catch {
+    // ignore
+  }
+  return [...out];
+}
+
+function loginUrlCandidates(baseUrl) {
+  const urls = [];
+  for (const base of baseUrlVariants(baseUrl)) {
+    const b = base.replace(/\/$/, "");
+    urls.push(
+      `${b}/login.php`,
+      `${b}/signin.php`,
+      `${b}/login`,
+      `${b}/signin`,
+      `${b}/sign-in`,
+    );
+  }
+  return [...new Set(urls)];
+}
+
 async function pageText(page) {
   try {
     return await page.locator("body").innerText();
@@ -18,31 +51,64 @@ async function pageText(page) {
   }
 }
 
+async function emitPageDiagnostics(bus, page, tag) {
+  const url = page.url();
+  let title = "";
+  try {
+    title = await page.title();
+  } catch {
+    title = "";
+  }
+  let snippet = "";
+  try {
+    snippet = trimText(await page.locator("body").innerText(), 400);
+  } catch {
+    snippet = "";
+  }
+  emit(bus, { type: "PAGE_DIAG", label: `[${tag}] ${url} | ${title} | ${snippet}` });
+}
+
 async function detectLoggedIn(page) {
+  const url = page.url().toLowerCase();
+  if (url.includes("logout") || url.includes("logoff")) return true;
+
+  const hrefLogout = await page.locator('a[href*="logout" i], a[href*="logoff" i], a[href*="sign_out" i]').count();
+  if (hrefLogout > 0) return true;
+
+  const roleLogout = await page.getByRole("link", { name: /log\s*out|sign\s*out|logoff/i }).count();
+  if (roleLogout > 0) return true;
+
   const t = await pageText(page);
-  return /\b(logout|sign out)\b/i.test(t);
+  if (/\b(log\s*out|logout|sign\s*out|signout|logoff)\b/i.test(t)) return true;
+
+  // Microworkers-style dashboard (no password field visible — avoids false positives on login page).
+  if (/\b(available jobs|my account|account balance|worker id|post a job|hire workers)\b/i.test(t)) {
+    const pwdVisible = await page.locator("input[type='password']:visible").count();
+    if (pwdVisible === 0) return true;
+  }
+
+  return false;
 }
 
 async function navigateToLogin(page, cfg, bus) {
   emit(bus, { type: "NAVIGATE", label: `Base ${cfg.MICROWORKERS_BASE_URL}` });
   await page.goto(cfg.MICROWORKERS_BASE_URL, { waitUntil: "domcontentloaded" });
+  await emitPageDiagnostics(bus, page, "after base");
 
   const loggedIn = await detectLoggedIn(page);
   if (loggedIn) return;
 
-  // Try common login paths first.
-  const candidates = [
-    `${cfg.MICROWORKERS_BASE_URL}/login`,
-    `${cfg.MICROWORKERS_BASE_URL}/signin`,
-    `${cfg.MICROWORKERS_BASE_URL}/sign-in`,
-  ];
+  const candidates = loginUrlCandidates(cfg.MICROWORKERS_BASE_URL);
 
   for (const url of candidates) {
     try {
       emit(bus, { type: "NAVIGATE", label: `Try ${url}` });
       await page.goto(url, { waitUntil: "domcontentloaded" });
       const t = await pageText(page);
-      if (/\b(password|sign in|login)\b/i.test(t)) return;
+      if (/\b(password|sign in|log in|login)\b/i.test(t) || (await page.locator('input[type="password"]').count()) > 0) {
+        await emitPageDiagnostics(bus, page, "login form");
+        return;
+      }
     } catch {
       // try next
     }
@@ -50,7 +116,7 @@ async function navigateToLogin(page, cfg, bus) {
 
   emit(bus, {
     type: cfg.SAFE_MANUAL_PAUSE ? "MANUAL_PAUSE" : "LOGIN_ASSIST_REQUIRED",
-    label: "Could not locate login page automatically. Please complete login in the visible browser. Resume only if needed.",
+    label: "Could not locate login page automatically. Set MICROWORKERS_BASE_URL=https://www.microworkers.com and use ENABLE_VNC=true if Cloudflare blocks headless login.",
   });
 }
 
@@ -63,9 +129,14 @@ async function loginWithCredentials(page, cfg, bus) {
     return false;
   }
 
-  // Best-effort: try common email/password input patterns.
-  const emailLocator = page.locator('input[type="email"], input[name*="email" i], input[autocomplete="username"], input[id*="email" i]');
-  const passwordLocator = page.locator('input[type="password"], input[name*="password" i], input[id*="password" i]');
+  // Best-effort: Microworkers login.php often uses a text field named email/username.
+  let emailLocator = page.locator(
+    'input[type="email"], input[name="email" i], input[name*="email" i], input[name="username" i], input[id*="email" i], input[autocomplete="username"]',
+  );
+  if ((await emailLocator.count()) === 0) {
+    emailLocator = page.locator('form:has(input[type="password"]) input[type="text"]').first();
+  }
+  const passwordLocator = page.locator('input[type="password"]').first();
 
   if ((await emailLocator.count()) === 0 || (await passwordLocator.count()) === 0) {
     emit(bus, {
@@ -76,12 +147,13 @@ async function loginWithCredentials(page, cfg, bus) {
   }
 
   const emailEl = emailLocator.first();
-  const passEl = passwordLocator.first();
+  const passEl = passwordLocator;
 
   emit(bus, { type: "LOGIN_TYPE", label: "Email + password (best-effort)" });
   await emailEl.fill(cfg.MICROWORKERS_USERNAME);
   await passEl.fill(cfg.MICROWORKERS_PASSWORD);
 
+  const beforeUrl = page.url();
   // Try a submit/login button.
   const clicked = await clickIfExists({ page, bus, textRegex: /login|sign in|sign-in|submit/i, timeoutMs: 3000, actionName: "LOGIN_SUBMIT" });
   if (!clicked.clicked) {
@@ -92,7 +164,15 @@ async function loginWithCredentials(page, cfg, bus) {
     return false;
   }
 
+  try {
+    await page.waitForURL((u) => u.href !== beforeUrl, { timeout: 25000 });
+  } catch {
+    // stay on same URL sometimes; continue
+  }
   await page.waitForLoadState("domcontentloaded").catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(2000).catch(() => {});
+  await emitPageDiagnostics(bus, page, "after login submit");
   return detectLoggedIn(page);
 }
 
@@ -246,27 +326,39 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
     await loginIfNeeded(page, context, cfg, bus);
     if (!(await detectLoggedIn(page))) {
       emit(bus, { type: "LOGIN_NOT_CONFIRMED", label: "Login not confirmed." });
+      await emitPageDiagnostics(bus, page, "login not confirmed");
       if (cfg.SAFE_MANUAL_PAUSE) {
         emit(bus, { type: "MANUAL_PAUSE", label: "Complete login in the browser, then click Resume." });
         await manualGate.waitForResume();
       } else {
-        // Autonomous best-effort: retry a few times, then stop to avoid spinning.
         for (let i = 0; i < 5; i++) {
           await page.waitForTimeout(3000);
           if (await detectLoggedIn(page)) break;
           emit(bus, { type: "LOGIN_RECHECK", label: `Recheck login attempt ${i + 1}/5` });
         }
-        if (!(await detectLoggedIn(page))) throw new Error("Login not confirmed and SAFE_MANUAL_PAUSE is false.");
+        if (!(await detectLoggedIn(page))) {
+          emit(bus, {
+            type: "LOGIN_FAILED",
+            label:
+              "Still not logged in. Set MICROWORKERS_BASE_URL=https://www.microworkers.com. If you see Cloudflare, set ENABLE_VNC=true and finish the challenge in the virtual desktop, or set SAFE_MANUAL_PAUSE=true and use Resume after manual login.",
+          });
+          return;
+        }
       }
     }
 
     // Try to reach tasks list.
     emit(bus, { type: "NAVIGATE", label: "Going to tasks page" });
-    const taskUrls = [
-      `${cfg.MICROWORKERS_BASE_URL}/tasks`,
-      `${cfg.MICROWORKERS_BASE_URL}/task`,
-      `${cfg.MICROWORKERS_BASE_URL}/microworkers/tasks`,
-    ];
+    const taskUrls = [];
+    for (const b of baseUrlVariants(cfg.MICROWORKERS_BASE_URL)) {
+      const base = b.replace(/\/$/, "");
+      taskUrls.push(
+        `${base}/jobs.php`,
+        `${base}/campaigns.php`,
+        `${base}/tasks`,
+        `${base}/task`,
+      );
+    }
     let tasksLoaded = false;
     for (const url of taskUrls) {
       try {
@@ -400,7 +492,6 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
     });
   } catch (err) {
     emit(bus, { type: "ERROR", label: `Automation error: ${err?.message || String(err)}` });
-    throw err;
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
