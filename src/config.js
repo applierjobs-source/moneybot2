@@ -11,6 +11,11 @@ const EnvSchema = z.object({
   OPENAI_CLASSIFY_TASKS: z.coerce.boolean().default(true),
   OPENAI_SKIP_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
 
+  CAPSOLVER_API_KEY: z.string().min(1).optional(),
+  CAPSOLVER_ENABLED: z.coerce.boolean().default(true),
+  /** Required for CapSolver AntiCloudflareTask (“Just a moment…”) — static/sticky proxy per CapSolver docs */
+  CAPSOLVER_CLOUDFLARE_PROXY: z.string().min(1).optional(),
+
   BROWSER_HEADLESS: z
     .enum(["true", "false"])
     .default("false")

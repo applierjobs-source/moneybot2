@@ -58,6 +58,14 @@ This is a first-run scaffold. After you do one run and share the streamed output
 - the click-through strategy per task type
 - the phone-related skip detection (keywords + form detection)
 
+## CapSolver (optional)
+
+If you set `CAPSOLVER_API_KEY`, the agent will try to solve **Cloudflare Turnstile**, **reCAPTCHA v2**, and **hCaptcha** when they appear (login and task steps). Events are streamed as `CAPSOLVER_*` on the dashboard.
+
+For Cloudflare’s **“Just a moment…”** interstitial, CapSolver’s **AntiCloudflareTask** requires a **static/sticky proxy**. Set `CAPSOLVER_CLOUDFLARE_PROXY` in the format CapSolver documents (e.g. `ip:port:user:pass`). Without a proxy, use `ENABLE_VNC=true` and complete the challenge manually.
+
+Using third-party captcha-solving services may **violate the terms** of the site you automate. You are responsible for compliance with Microworkers’ rules and applicable law.
+
 ## Railway: realtime virtual display (noVNC)
 
 Railway containers don’t have a real desktop, so “headful” needs a virtual display.

@@ -5,6 +5,7 @@ const { chromium } = require("playwright");
 const { textLooksLikePhoneTask, formLooksLikePhoneTask } = require("./phoneFilter");
 const { clickIfExists, trimText } = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
+const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 
 function emit(bus, event) {
   bus.emit("event", event);
@@ -107,6 +108,7 @@ async function navigateToLogin(page, cfg, bus) {
       const t = await pageText(page);
       if (/\b(password|sign in|log in|login)\b/i.test(t) || (await page.locator('input[type="password"]').count()) > 0) {
         await emitPageDiagnostics(bus, page, "login form");
+        await trySolveCaptchasOnPage(page, cfg, bus, "login form");
         return;
       }
     } catch {
@@ -146,6 +148,8 @@ async function loginWithCredentials(page, cfg, bus) {
     return false;
   }
 
+  await trySolveCaptchasOnPage(page, cfg, bus, "before login fill");
+
   const emailEl = emailLocator.first();
   const passEl = passwordLocator;
 
@@ -173,11 +177,13 @@ async function loginWithCredentials(page, cfg, bus) {
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(2000).catch(() => {});
   await emitPageDiagnostics(bus, page, "after login submit");
+  await trySolveCaptchasOnPage(page, cfg, bus, "after login submit");
   return detectLoggedIn(page);
 }
 
 async function loginIfNeeded(page, context, cfg, bus) {
   await page.goto(cfg.MICROWORKERS_BASE_URL, { waitUntil: "domcontentloaded" });
+  await trySolveCaptchasOnPage(page, cfg, bus, "base");
   const ok = await detectLoggedIn(page);
   if (ok) return true;
 
@@ -201,6 +207,7 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
 
   const maxSteps = 20;
   for (let step = 0; step < maxSteps; step++) {
+    await trySolveCaptchasOnPage(page, cfg, bus, `${taskLabel} step ${step + 1}`);
     const body = await pageText(page);
     if (/\b(done|completed|success)\b/i.test(body)) {
       emit(bus, { type: "TASK_COMPLETE", label: `${taskLabel} marked complete` });
@@ -340,7 +347,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
           emit(bus, {
             type: "LOGIN_FAILED",
             label:
-              "Still not logged in. Set MICROWORKERS_BASE_URL=https://www.microworkers.com. If you see Cloudflare, set ENABLE_VNC=true and finish the challenge in the virtual desktop, or set SAFE_MANUAL_PAUSE=true and use Resume after manual login.",
+              "Still not logged in. Set MICROWORKERS_BASE_URL=https://www.microworkers.com. Add CAPSOLVER_API_KEY for widget captchas; for Cloudflare interstitial add CAPSOLVER_CLOUDFLARE_PROXY or use ENABLE_VNC / SAFE_MANUAL_PAUSE.",
           });
           return;
         }
@@ -363,6 +370,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
     for (const url of taskUrls) {
       try {
         await page.goto(url, { waitUntil: "domcontentloaded" });
+        await trySolveCaptchasOnPage(page, cfg, bus, "tasks page");
         const t = await pageText(page);
         if (/\b(task|available|earn|work)\b/i.test(t)) {
           tasksLoaded = true;
@@ -384,6 +392,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
           for (const url of taskUrls) {
             try {
               await page.goto(url, { waitUntil: "domcontentloaded" });
+              await trySolveCaptchasOnPage(page, cfg, bus, "tasks recheck");
             } catch {
               // ignore
             }
