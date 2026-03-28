@@ -1,0 +1,126 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Moneybot2 Agent Stream</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        margin: 16px;
+        background: #0b1020;
+        color: #e8eefc;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      button {
+        background: #2b6cff;
+        color: #fff;
+        border: 0;
+        padding: 10px 14px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      #log {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        padding: 12px;
+        height: 70vh;
+        overflow: auto;
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .entry {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .meta {
+        opacity: 0.8;
+        margin-bottom: 4px;
+      }
+      .type {
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <div>Microworkers automation stream</div>
+      <div style="flex:1"></div>
+      <button id="resumeBtn" disabled>Resume</button>
+    </div>
+
+    <div id="log"></div>
+
+    <script>
+      const logEl = document.getElementById("log");
+      const resumeBtn = document.getElementById("resumeBtn");
+
+      function addEntry(event) {
+        const div = document.createElement("div");
+        div.className = "entry";
+
+        const ts = new Date().toISOString();
+        const type = event?.type || "EVENT";
+        const label = event?.label || "";
+
+        div.innerHTML = `
+          <div class="meta">
+            <span class="type">${type}</span> <span>${ts}</span>
+          </div>
+          <div>${escapeHtml(label)}</div>
+        `;
+
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function escapeHtml(s) {
+        return String(s ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      let manualPauseActive = false;
+      const es = new EventSource("/events");
+      es.onmessage = (m) => {
+        let payload;
+        try {
+          payload = JSON.parse(m.data);
+        } catch {
+          payload = { type: "PARSE_ERROR", label: m.data };
+        }
+        addEntry(payload);
+
+        if (payload?.type === "MANUAL_PAUSE" || payload?.type === "MANUAL_RESUME") {
+          manualPauseActive = payload?.type === "MANUAL_PAUSE";
+          resumeBtn.disabled = !manualPauseActive;
+        }
+      };
+    es.onerror = () => {
+      addEntry({ type: "SSE_ERROR", label: "Disconnected from event stream. Check server logs and reload." });
+    };
+
+      resumeBtn.addEventListener("click", async () => {
+        resumeBtn.disabled = true;
+        manualPauseActive = false;
+        await fetch("/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      });
+    </script>
+  </body>
+</html>
+
