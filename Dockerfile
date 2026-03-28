@@ -19,7 +19,12 @@ COPY . .
 # Ensure Chromium is available inside the container.
 RUN npx playwright install chromium
 
+# Avoid interactive tzdata "Geographic area?" prompts during apt (hangs headless builds).
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
+  tzdata \
   xvfb x11vnc websockify ca-certificates wget \
   && rm -rf /var/lib/apt/lists/*
 
