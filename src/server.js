@@ -41,7 +41,17 @@ function createServer({ bus, manualGate, port }) {
     };
 
     bus.on("event", onEvent);
+    // Comment lines keep some proxies (and Railway) from closing “idle” SSE connections.
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: ping ${Date.now()}\n\n`);
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 20000);
+
     req.on("close", () => {
+      clearInterval(heartbeat);
       bus.off("event", onEvent);
     });
   });

@@ -123,6 +123,24 @@ async function navigateToLogin(page, cfg, bus) {
   });
 }
 
+async function submitMicroworkersLogin(page, bus) {
+  // IMPORTANT: login.php has a nav link <a>Login</a> AND a submit value="Login".
+  // Generic hasText:/login/ matches the link first and reloads the form (empty fields + HTML5 errors).
+  const mwSubmit = page.locator('input[type="submit"][name="Button"][value="Login"]');
+  if ((await mwSubmit.count()) > 0) {
+    emit(bus, { type: "LOGIN_SUBMIT", label: "Microworkers: clicking POST submit (name=Button), not header Login link" });
+    await mwSubmit.click();
+    return true;
+  }
+  const alt = page.locator(".loginform input[type='submit']").first();
+  if ((await alt.count()) > 0) {
+    emit(bus, { type: "LOGIN_SUBMIT", label: "Microworkers: clicking .loginform submit" });
+    await alt.click();
+    return true;
+  }
+  return false;
+}
+
 async function loginWithCredentials(page, cfg, bus) {
   if (!cfg.MICROWORKERS_USERNAME || !cfg.MICROWORKERS_PASSWORD) {
     emit(bus, {
@@ -132,14 +150,23 @@ async function loginWithCredentials(page, cfg, bus) {
     return false;
   }
 
-  // Best-effort: Microworkers login.php often uses a text field named email/username.
-  let emailLocator = page.locator(
-    'input[type="email"], input[name="email" i], input[name*="email" i], input[name="username" i], input[id*="email" i], input[autocomplete="username"]',
-  );
-  if ((await emailLocator.count()) === 0) {
-    emailLocator = page.locator('form:has(input[type="password"]) input[type="text"]').first();
+  const onMwLogin =
+    /microworkers\.com/i.test(page.url()) && /login\.php/i.test(page.url());
+
+  let emailLocator;
+  let passwordLocator;
+  if (onMwLogin) {
+    emailLocator = page.locator("#Email, input[name=\"Email\"]");
+    passwordLocator = page.locator("#Password, input[name=\"Password\"]");
+  } else {
+    emailLocator = page.locator(
+      'input[type="email"], input[name="email" i], input[name*="email" i], input[name="username" i], input[id*="email" i], input[autocomplete="username"]',
+    );
+    if ((await emailLocator.count()) === 0) {
+      emailLocator = page.locator('form:has(input[type="password"]) input[type="text"]').first();
+    }
+    passwordLocator = page.locator('input[type="password"]').first();
   }
-  const passwordLocator = page.locator('input[type="password"]').first();
 
   if ((await emailLocator.count()) === 0 || (await passwordLocator.count()) === 0) {
     emit(bus, {
@@ -152,16 +179,24 @@ async function loginWithCredentials(page, cfg, bus) {
   await trySolveCaptchasOnPage(page, cfg, bus, "before login fill");
 
   const emailEl = emailLocator.first();
-  const passEl = passwordLocator;
+  const passEl = passwordLocator.first();
 
-  emit(bus, { type: "LOGIN_TYPE", label: "Email + password (best-effort)" });
+  emit(bus, { type: "LOGIN_TYPE", label: onMwLogin ? "Microworkers login.php (#Email / #Password)" : "Email + password (best-effort)" });
+  await emailEl.click();
   await emailEl.fill(cfg.MICROWORKERS_USERNAME);
+  await passEl.click();
   await passEl.fill(cfg.MICROWORKERS_PASSWORD);
 
   const beforeUrl = page.url();
-  // Try a submit/login button.
-  const clicked = await clickIfExists({ page, bus, textRegex: /login|sign in|sign-in|submit/i, timeoutMs: 3000, actionName: "LOGIN_SUBMIT" });
-  if (!clicked.clicked) {
+  let submitted = false;
+  if (onMwLogin) {
+    submitted = await submitMicroworkersLogin(page, bus);
+  }
+  if (!submitted) {
+    const clicked = await clickIfExists({ page, bus, textRegex: /login|sign in|sign-in|submit/i, timeoutMs: 3000, actionName: "LOGIN_SUBMIT" });
+    submitted = clicked.clicked;
+  }
+  if (!submitted) {
     emit(bus, {
       type: cfg.SAFE_MANUAL_PAUSE ? "MANUAL_PAUSE" : "LOGIN_ASSIST_REQUIRED",
       label: "Found credentials fields but could not find a login button. Please submit manually in the visible browser. Resume only if needed.",
