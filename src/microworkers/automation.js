@@ -306,9 +306,25 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
   const storageDir = path.dirname(storageStatePath);
   if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });
 
+  const keepBrowserForVnc = process.env.ENABLE_VNC === "true";
+
+  const launchArgs = [
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+  ];
+  if (!cfg.BROWSER_HEADLESS) {
+    launchArgs.push(
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--window-size=1920,1080",
+      "--window-position=0,0",
+    );
+  }
+
   const browser = await chromium.launch({
     headless: cfg.BROWSER_HEADLESS,
-    args: ["--disable-dev-shm-usage"],
+    args: launchArgs,
   });
 
   const context = await browser.newContext({
@@ -507,9 +523,20 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
   } catch (err) {
     emit(bus, { type: "ERROR", label: `Automation error: ${err?.message || String(err)}` });
   } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
-    emit(bus, { type: "AUTOMATION_END", label: "Automation finished" });
+    if (keepBrowserForVnc) {
+      emit(bus, {
+        type: "VNC_BROWSER_LEFT_OPEN",
+        label:
+          "Chromium was left running so the Live browser shows the real session. If you only see black, reload this page after AUTOMATION_START. Redeploy the service to close the browser and run again.",
+      });
+    } else {
+      await context.close().catch(() => {});
+      await browser.close().catch(() => {});
+    }
+    emit(bus, {
+      type: "AUTOMATION_END",
+      label: keepBrowserForVnc ? "Automation pass ended (browser kept open for VNC)" : "Automation finished",
+    });
   }
 }
 

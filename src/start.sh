@@ -5,9 +5,14 @@ export DISPLAY="${DISPLAY:-:99}"
 
 if [[ "${ENABLE_VNC:-false}" == "true" ]]; then
   export BROWSER_HEADLESS=false
+  # Force virtual display (don’t inherit a bogus DISPLAY from the host)
+  export DISPLAY=:99
   echo "Starting Xvfb on ${DISPLAY}..."
-  Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+  Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -ac +extension RANDR +render -noreset &
   XVFB_PID=$!
+
+  # Let Xvfb come up before Node launches Chromium (avoids headless fallback / no window)
+  sleep 2
 
   echo "Starting x11vnc on port 5900..."
   # For private/internal use. If you need access control, we should add VNC password + firewalling.

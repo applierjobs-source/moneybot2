@@ -76,3 +76,5 @@ Railway usually gives **one** public URL (your app port). noVNC still listens on
 
 Login failures also emit **`LOGIN_ANALYSIS`**, **`LOGIN_STATE`**, and **`PAGE_SNIPPET`** so the log explains what the page looked like (Cloudflare vs captcha vs still on login form), not only a generic `LOGIN_FAILED` line.
 
+If the **Live browser** area is **black**: the old build closed Chromium when the run ended, so VNC showed an empty desktop. The current build keeps Chromium running when **`ENABLE_VNC=true`**, and adds Docker/Xvfb-safe Chrome flags. Reload the dashboard right after deploy so you connect while the browser is still open; you should then see the Microworkers window.
+
