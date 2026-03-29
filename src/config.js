@@ -15,6 +15,10 @@ const EnvSchema = z.object({
   OPENAI_COMPLETION_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.72),
   /** Run completion classifier every N loop steps (1 = each step; raise to save API cost) */
   OPENAI_COMPLETION_EVERY_N_STEPS: z.coerce.number().int().min(1).max(20).default(1),
+  /** OpenAI chooses each in-task CLICK / TASK_DONE (default on when API key set) */
+  OPENAI_TASK_RUNNER: z.coerce.boolean().default(true),
+  OPENAI_TASK_RUNNER_MAX_STEPS: z.coerce.number().int().positive().default(55),
+  OPENAI_TASK_UI_ELEMENTS_MAX: z.coerce.number().int().min(30).max(150).optional(),
   /** Use OpenAI to choose clicks/navigations from a numbered UI list (recommended when OPENAI_API_KEY is set) */
   OPENAI_NAVIGATOR: z.coerce.boolean().default(true),
   /** If unset, defaults to min(2_000_000, MAX_TASKS_PER_RUN * 40) in loadConfigFromEnv */

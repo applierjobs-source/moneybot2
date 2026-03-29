@@ -12,6 +12,7 @@ const {
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
 const { classifyTaskCompletionForPayment } = require("../openai/completionClassifier");
 const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
+const { runOpenAITaskRunnerLoop } = require("../openai/taskRunner");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 const { emitLoginAnalysis } = require("./loginDiagnostics");
 
@@ -508,12 +509,25 @@ async function completeTask({ taskPageOrMain, pageMain, context, bus, cfg, taskL
     return { status: "skipped_phone" };
   }
 
+  if (cfg.OPENAI_API_KEY && cfg.OPENAI_TASK_RUNNER) {
+    const aiRes = await runOpenAITaskRunnerLoop({
+      page,
+      context,
+      bus,
+      cfg,
+      taskLabel,
+    });
+    if (aiRes.completed) return { status: "completed" };
+    if (aiRes.skippedPhone) return { status: "skipped_phone" };
+    return { status: "needs_manual" };
+  }
+
   const res = await clickContinueLoop({ page, bus, cfg, taskLabel });
   if (res.completed) return { status: "completed" };
   if (res.skippedPhone) return { status: "skipped_phone" };
   emit(bus, {
     type: "TASK_NEEDS_MANUAL",
-    label: `${taskLabel}: Heuristic clicks exhausted (iframes/custom widgets). ${trimText(page.url(), 140)}`,
+    label: `${taskLabel}: Heuristic clicks exhausted (no OpenAI task runner). ${trimText(page.url(), 140)}`,
   });
   return { status: "needs_manual" };
 }
