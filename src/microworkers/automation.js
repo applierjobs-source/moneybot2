@@ -286,6 +286,47 @@ async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Detect real task submission / payout confirmation. Avoid bare words like "success" or "done"
+ * that appear in job descriptions, footers, and ads (caused false TASK_COMPLETE).
+ */
+function findTaskCompletionMatch(body, { afterProgressClicks }) {
+  const strong = [
+    /proof\s+accepted/i,
+    /proof\s+has\s+been\s+accepted/i,
+    /your\s+proof\s+was\s+accepted/i,
+    /proof\s+was\s+successfully\s+submitted/i,
+    /you\s+will\s+be\s+paid/i,
+    /you\s+have\s+been\s+paid/i,
+    /you\s+have\s+been\s+credited/i,
+    /task\s+has\s+been\s+submitted/i,
+    /successfully\s+submitted/i,
+    /submission\s+(?:was\s+)?successful/i,
+    /your\s+submission\s+has\s+been\s+received/i,
+    /thank\s+you[\s\S]{0,280}?(submitted|accepted|paid|proof|participation)/i,
+    /have\s+already\s+completed\s+this(?:\s+task)?/i,
+    /you\s+have\s+already\s+submitted/i,
+    /already\s+submitted\s+your\s+proof/i,
+    /you\s+have\s+successfully\s+completed(?:\s+this)?/i,
+    /(?:job|task|campaign)\s+(?:is\s+)?(?:was\s+)?successfully\s+completed\b/i,
+  ];
+  for (const re of strong) {
+    if (re.test(body)) return re;
+  }
+  if (afterProgressClicks > 0) {
+    const weaker = [
+      /\bproof\s+submitted\b/i,
+      /\btask\s+submitted\b/i,
+      /\bsubmitted\s+successfully\b/i,
+      /\bcongratulations[\s\S]{0,160}\b(submit|submitted|proof|paid|complete)/i,
+    ];
+    for (const re of weaker) {
+      if (re.test(body)) return re;
+    }
+  }
+  return null;
+}
+
 async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
   const actionPriority = [
     /continue|next|proceed|go\s+to\s+next|move\s+on/i,
@@ -302,15 +343,16 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
   ];
 
   const maxSteps = 80;
+  let progressClicks = 0;
   for (let step = 0; step < maxSteps; step++) {
     await trySolveCaptchasOnPage(page, cfg, bus, `${taskLabel} step ${step + 1}`);
     const body = await pageTextDeep(page);
-    if (
-      /\b(done|completed|success|submitted|thank\s+you|task\s+submitted|proof\s+accepted|you\s+will\s+be\s+paid|successfully\s+submitted|already\s+submitted|congratulations|approved)\b/i.test(
-        body,
-      )
-    ) {
-      emit(bus, { type: "TASK_COMPLETE", label: `${taskLabel} marked complete` });
+    const completionRe = findTaskCompletionMatch(body, { afterProgressClicks: progressClicks });
+    if (completionRe) {
+      emit(bus, {
+        type: "TASK_COMPLETE",
+        label: `${taskLabel} — submission detected (${trimText(completionRe.source, 80)})`,
+      });
       return { completed: true };
     }
 
@@ -381,6 +423,7 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
     }
 
     if (clickedAny) {
+      progressClicks++;
       await page.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
       await sleep(400);
       continue;
