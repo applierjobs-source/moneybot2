@@ -50,7 +50,17 @@ async function gatherFlattenedUi(page, maxTotal) {
   return { lines: parts, targets };
 }
 
-async function askTaskStepDecision({ page, bus, cfg, bodyExcerpt, lines, taskLabel, step, maxSteps }) {
+async function askTaskStepDecision({
+  page,
+  bus,
+  cfg,
+  bodyExcerpt,
+  lines,
+  taskLabel,
+  step,
+  maxSteps,
+  repairMessage,
+}) {
   const client = new OpenAI({ apiKey: cfg.OPENAI_API_KEY });
   let url = "";
   let title = "";
@@ -65,15 +75,20 @@ async function askTaskStepDecision({ page, bus, cfg, bodyExcerpt, lines, taskLab
     title = "";
   }
 
+  const n = lines.length;
+  const maxIdx = Math.max(0, n - 1);
+
   const system = [
     "You operate INSIDE an active Microworkers worker task (instructions, forms, proof upload, external steps).",
     "Pick ONE next step as strict JSON only (no markdown).",
-    "CLICK: choose an index from the numbered list to advance the task (Continue, Submit proof, I agree, Visit link, Next, etc.).",
+    "CLICK: pick ONE index from the numbered list [0], [1], … ONLY. The index integer MUST appear in that list — never use question numbers, exam scores, step counts, or any number from prose.",
+    `If the list has ${n} items, valid CLICK indices are exactly 0 through ${maxIdx}.`,
     "Avoid Microworkers global nav junk: \"Tasks I finished\", \"Available jobs\", \"Logout\", \"My account\", \"Post a job\" — do not CLICK those unless absolutely required to unblock the task.",
     "If this task requires installing or using a native iOS/Android app (App Store, Google Play, APK, TestFlight), return NEEDS_MANUAL — desktop automation cannot do that.",
     "TASK_DONE: page clearly shows THIS task is finished for payment (proof accepted, submitted, you will be paid, already completed this task). Include confidence 0-1.",
     "NEEDS_MANUAL: only if automation cannot proceed safely (captcha unsolved, must type free text, upload files you cannot describe, ambiguous).",
     "SKIP_STEP: wait / nothing actionable right now / page still loading.",
+    "If the interactive list is empty, never CLICK — use SKIP_STEP or NEEDS_MANUAL.",
     "Schema:",
     '{"action":"CLICK","index":number,"reason":"string"}',
     '{"action":"TASK_DONE","reason":"string","confidence":number}',
@@ -81,27 +96,42 @@ async function askTaskStepDecision({ page, bus, cfg, bodyExcerpt, lines, taskLab
     '{"action":"NEEDS_MANUAL","reason":"string"}',
   ].join(" ");
 
+  const indexRules =
+    n === 0
+      ? "There are ZERO listed interactive elements — do not use CLICK; use SKIP_STEP or NEEDS_MANUAL."
+      : `CLICK index MUST be between 0 and ${maxIdx} inclusive (${n} elements). Do not use any other number.`;
+
   const user = [
     `Task step ${step + 1} / max ${maxSteps}`,
     `URL: ${url}`,
     `Title: ${title}`,
     `Context: ${trimText(taskLabel, 200)}`,
     "",
+    indexRules,
+    "",
     "Page text excerpt:",
     trimText(bodyExcerpt, 4500),
     "",
-    "Interactive elements (CLICK uses index exactly):",
+    "Interactive elements (CLICK index = leading [number] on each line):",
     lines.join("\n") || "(none)",
   ].join("\n");
 
-  bus.emit("event", { type: "OPENAI_TASK_ASK", label: `Model=${cfg.OPENAI_MODEL} elements=${lines.length}` });
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
+  if (repairMessage) {
+    messages.push({ role: "user", content: repairMessage });
+  }
+
+  bus.emit("event", {
+    type: "OPENAI_TASK_ASK",
+    label: `Model=${cfg.OPENAI_MODEL} elements=${n}${repairMessage ? " (repair)" : ""}`,
+  });
 
   const resp = await client.chat.completions.create({
     model: cfg.OPENAI_MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
+    messages,
     temperature: 0.1,
   });
 
@@ -143,25 +173,58 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
 
     const bodyExcerpt = await pageTextDeep(activePage);
     const { lines, targets } = await gatherFlattenedUi(activePage, uiCap);
+    const nTargets = targets.length;
 
     let decision;
-    try {
-      decision = await askTaskStepDecision({
-        page: activePage,
-        bus,
-        cfg,
-        bodyExcerpt,
-        lines,
-        taskLabel,
-        step,
-        maxSteps,
-      });
-    } catch (err) {
+    let repairMessage = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        decision = await askTaskStepDecision({
+          page: activePage,
+          bus,
+          cfg,
+          bodyExcerpt,
+          lines,
+          taskLabel,
+          step,
+          maxSteps,
+          repairMessage,
+        });
+      } catch (err) {
+        bus.emit("event", {
+          type: "OPENAI_TASK_ERROR",
+          label: trimText(String(err?.message || err), 280),
+        });
+        return { completed: false, skippedPhone: false, needsManual: true };
+      }
+      repairMessage = null;
+
+      if (decision.action !== "CLICK") break;
+
+      if (nTargets === 0) {
+        bus.emit("event", {
+          type: "OPENAI_TASK_BAD_INDEX",
+          label: "CLICK with empty UI list",
+        });
+        repairMessage =
+          "You returned CLICK but the interactive elements list is empty. Reply with SKIP_STEP or NEEDS_MANUAL, not CLICK.";
+        continue;
+      }
+
+      if (decision.index >= 0 && decision.index < nTargets) break;
+
       bus.emit("event", {
-        type: "OPENAI_TASK_ERROR",
-        label: trimText(String(err?.message || err), 280),
+        type: "OPENAI_TASK_BAD_INDEX",
+        label: `index ${decision.index} max ${nTargets - 1}`,
       });
-      return { completed: false, skippedPhone: false, needsManual: true };
+      repairMessage = `Your JSON used CLICK index ${decision.index}, but the list only has indices 0 through ${
+        nTargets - 1
+      } (${nTargets} lines). Reply with ONE new JSON object: either CLICK with a valid index from that list, or SKIP_STEP / NEEDS_MANUAL.`;
+    }
+
+    if (decision.action === "CLICK" && (nTargets === 0 || decision.index < 0 || decision.index >= nTargets)) {
+      await activePage.waitForTimeout(600).catch(() => {});
+      continue;
     }
 
     if (decision.action === "TASK_DONE") {
@@ -172,7 +235,7 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
         });
         return { completed: true, skippedPhone: false, needsManual: false };
       }
-      await page.waitForTimeout(800).catch(() => {});
+      await activePage.waitForTimeout(800).catch(() => {});
       continue;
     }
 
@@ -190,14 +253,6 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
     }
 
     if (decision.action === "CLICK") {
-      if (decision.index >= targets.length) {
-        bus.emit("event", {
-          type: "OPENAI_TASK_BAD_INDEX",
-          label: `index ${decision.index} max ${targets.length - 1}`,
-        });
-        continue;
-      }
-
       const { frame, localIndex } = targets[decision.index];
       const popupPromise = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
       const clickRes = await clickGatheredIndex(frame, localIndex);
