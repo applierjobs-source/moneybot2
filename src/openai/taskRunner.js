@@ -70,6 +70,7 @@ async function askTaskStepDecision({ page, bus, cfg, bodyExcerpt, lines, taskLab
     "Pick ONE next step as strict JSON only (no markdown).",
     "CLICK: choose an index from the numbered list to advance the task (Continue, Submit proof, I agree, Visit link, Next, etc.).",
     "Avoid Microworkers global nav junk: \"Tasks I finished\", \"Available jobs\", \"Logout\", \"My account\", \"Post a job\" — do not CLICK those unless absolutely required to unblock the task.",
+    "If this task requires installing or using a native iOS/Android app (App Store, Google Play, APK, TestFlight), return NEEDS_MANUAL — desktop automation cannot do that.",
     "TASK_DONE: page clearly shows THIS task is finished for payment (proof accepted, submitted, you will be paid, already completed this task). Include confidence 0-1.",
     "NEEDS_MANUAL: only if automation cannot proceed safely (captcha unsolved, must type free text, upload files you cannot describe, ambiguous).",
     "SKIP_STEP: wait / nothing actionable right now / page still loading.",

@@ -15,6 +15,7 @@ const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
 const { runOpenAITaskRunnerLoop } = require("../openai/taskRunner");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 const { emitLoginAnalysis } = require("./loginDiagnostics");
+const { listingTextSuggestsMobileAppTask } = require("./mobileListingFilter");
 
 function emit(bus, event) {
   bus.emit("event", event);
@@ -565,6 +566,9 @@ async function findTaskCandidates(page, cfg) {
         href: node.getAttribute("href") || null,
       };
     });
+    if (listingTextSuggestsMobileAppTask(info.text) || listingTextSuggestsMobileAppTask(info.href || "")) {
+      continue;
+    }
     candidates.push({ index: i, ...info });
   }
   return { candidates, taskClickLocator };

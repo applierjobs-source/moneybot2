@@ -3,6 +3,7 @@ const { z } = require("zod");
 const { trimText } = require("../utils/playwrightHelpers");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 const { gatherInteractiveElements, clickGatheredIndex } = require("./uiGather");
+const { listingTextSuggestsMobileAppTask } = require("../microworkers/mobileListingFilter");
 
 const DecisionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("CLICK"), index: z.number().int().min(0), reason: z.string().min(1) }),
@@ -83,7 +84,10 @@ async function askNavigatorDecision({
     const hk = resolveListingHrefKey(url, e.href || "");
     const triedHref = hk && attemptedKeys.has(hk);
     const triedIdx = blockedIndices.includes(i);
-    const mark = triedHref || triedIdx ? " [ALREADY_TRIED—pick another index or SKIP_STEP] " : " ";
+    const mobileRow = listingTextSuggestsMobileAppTask(`${e.text || ""} ${e.href || ""}`);
+    let mark = " ";
+    if (triedHref || triedIdx) mark = " [ALREADY_TRIED—pick another index or SKIP_STEP] ";
+    else if (mobileRow) mark = " [MOBILE/IOS/ANDROID—do not CLICK—automation cannot run app installs] ";
     return `[${i}]${mark}<${e.tag}> "${e.text}"${e.href ? ` href=${e.href}` : ""}`;
   });
 
@@ -97,6 +101,7 @@ async function askNavigatorDecision({
     "You are a browser automation planner for Microworkers (worker side).",
     "Pick ONE next step as strict JSON only (no markdown).",
     "Goals: reach available jobs, open a suitable job, avoid phone/SMS/OTP/voice verification tasks.",
+    "Never CLICK an index tagged MOBILE/IOS/ANDROID or any job clearly requiring an iPhone/iPad/Android app, App Store, Google Play, APK, TestFlight, or install/download-app flows — desktop browser automation cannot complete those.",
     "Prefer actions that clearly start or accept work: Accept, Apply, Participate, View job, Start, Continue, etc.",
     "For CLICK, the reason field must name the control you are clicking (e.g. \"View job\"), not a phone/SMS suitability essay — suitability is checked later by automation.",
     "Avoid: Logout, Login (user is already logged in), Blog, social, Terms/Privacy unless needed to unblock.",
@@ -269,6 +274,16 @@ async function runOpenAINavigatorJobLoop({
         bus.emit("event", {
           type: "OPENAI_NAV_DUPLICATE_BLOCKED",
           label: trimText(`Blocked duplicate listing: ${listingHrefKey}`, 220),
+        });
+        continue;
+      }
+
+      const chosenBlob = `${chosen?.text || ""} ${chosen?.href || ""}`;
+      if (listingTextSuggestsMobileAppTask(chosenBlob)) {
+        addDeadClickIndex(deadClickByListingUrl, prevUrl, decision.index);
+        bus.emit("event", {
+          type: "OPENAI_NAV_SKIP_MOBILE_LISTING",
+          label: trimText(`Blocked mobile/app listing: ${chosen?.text || chosen?.href || ""}`, 200),
         });
         continue;
       }
