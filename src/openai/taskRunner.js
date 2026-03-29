@@ -30,7 +30,10 @@ async function pageTextDeep(page) {
   return parts.filter(Boolean).join("\n");
 }
 
-async function gatherFlattenedUi(page, maxTotal) {
+/** Extra px below viewport to still count controls (after we scroll, Next may sit just off-screen). */
+const TASK_GATHER_BELOW_FOLD_SLACK = 3200;
+
+async function gatherFlattenedUi(page, maxTotal, gatherOptions = {}) {
   const targets = [];
   const parts = [];
   let g = 0;
@@ -38,7 +41,7 @@ async function gatherFlattenedUi(page, maxTotal) {
   for (let fi = 0; fi < frames.length && g < maxTotal; fi++) {
     const frame = frames[fi];
     if (frame.isDetached()) continue;
-    const els = await gatherInteractiveElements(frame);
+    const els = await gatherInteractiveElements(frame, gatherOptions);
     const tagLabel = fi === 0 ? "main" : `iframe${fi}`;
     for (let li = 0; li < els.length && g < maxTotal; li++) {
       const e = els[li];
@@ -48,6 +51,85 @@ async function gatherFlattenedUi(page, maxTotal) {
     }
   }
   return { lines: parts, targets };
+}
+
+async function scrollTaskSurfaces(page) {
+  const frames = orderedFrames(page);
+  for (const f of frames) {
+    if (f.isDetached()) continue;
+    try {
+      await f.evaluate(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const maxOutScroll = () => {
+          document.querySelectorAll("*").forEach((el) => {
+            const s = getComputedStyle(el);
+            if (
+              (s.overflowY === "auto" || s.overflowY === "scroll") &&
+              el.scrollHeight > el.clientHeight + 24
+            ) {
+              el.scrollTop = el.scrollHeight;
+            }
+          });
+        };
+        const step = Math.min(500, Math.ceil((window.innerHeight || 720) * 0.72));
+        const bottom = Math.max(
+          document.documentElement.scrollHeight,
+          document.body ? document.body.scrollHeight : 0,
+        );
+        for (let y = 0; y <= bottom + step; y += step) {
+          window.scrollTo(0, y);
+          maxOutScroll();
+          await sleep(45);
+        }
+        window.scrollTo(0, bottom);
+        maxOutScroll();
+        await sleep(100);
+      });
+    } catch {
+      // ignore
+    }
+  }
+  try {
+    const vp = page.viewportSize();
+    if (vp) {
+      const x = Math.max(80, Math.floor(vp.width / 2));
+      const y = Math.max(80, Math.floor(vp.height / 2));
+      await page.mouse.move(x, y);
+      for (let i = 0; i < 10; i++) {
+        await page.mouse.wheel(0, 520);
+        await page.waitForTimeout(90);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function tryPlaywrightFallbackNext(activePage, bus, taskLabel) {
+  const nameRes = [/^next$/i, /^next step$/i, /^continue$/i, /^proceed$/i];
+  const roles = ["button", "link"];
+  const frames = orderedFrames(activePage);
+  for (const f of frames) {
+    if (f.isDetached()) continue;
+    for (const role of roles) {
+      for (const name of nameRes) {
+        try {
+          const loc = f.getByRole(role, { name }).first();
+          if ((await loc.count()) === 0) continue;
+          await loc.scrollIntoViewIfNeeded({ timeout: 5000 });
+          await loc.click({ timeout: 5000 });
+          bus.emit("event", {
+            type: "OPENAI_TASK_FALLBACK_CLICK",
+            label: `${trimText(taskLabel, 70)} — Playwright ${role} name=${String(name)}`,
+          });
+          return true;
+        } catch {
+          // try next
+        }
+      }
+    }
+  }
+  return false;
 }
 
 async function askTaskStepDecision({
@@ -171,13 +253,18 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
       return { completed: false, skippedPhone: true, needsManual: false };
     }
 
+    bus.emit("event", { type: "OPENAI_TASK_SCROLL", label: "Scrolling window + overflow areas to reveal controls" });
+    await scrollTaskSurfaces(activePage);
+    await activePage.waitForTimeout(200).catch(() => {});
+
     const bodyExcerpt = await pageTextDeep(activePage);
-    const { lines, targets } = await gatherFlattenedUi(activePage, uiCap);
+    const gatherOpts = { belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK };
+    const { lines, targets } = await gatherFlattenedUi(activePage, uiCap, gatherOpts);
     const nTargets = targets.length;
 
     let decision;
     let repairMessage = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         decision = await askTaskStepDecision({
           page: activePage,
@@ -217,12 +304,30 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
         type: "OPENAI_TASK_BAD_INDEX",
         label: `index ${decision.index} max ${nTargets - 1}`,
       });
-      repairMessage = `Your JSON used CLICK index ${decision.index}, but the list only has indices 0 through ${
-        nTargets - 1
-      } (${nTargets} lines). Reply with ONE new JSON object: either CLICK with a valid index from that list, or SKIP_STEP / NEEDS_MANUAL.`;
+      repairMessage = [
+        `Your JSON used CLICK index ${decision.index}, but ONLY indices 0..${nTargets - 1} exist (${nTargets} lines).`,
+        "Reply with ONE JSON object: CLICK with a valid index, or SKIP_STEP / NEEDS_MANUAL.",
+        "Do NOT use question numbers, exam step numbers, or 3/5/6 from the page text.",
+        "The ONLY allowed indices and labels are:",
+        lines.join("\n") || "(none)",
+      ].join("\n");
     }
 
     if (decision.action === "CLICK" && (nTargets === 0 || decision.index < 0 || decision.index >= nTargets)) {
+      const popupPromise = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
+      const fb = await tryPlaywrightFallbackNext(activePage, bus, taskLabel);
+      if (fb) {
+        await activePage.waitForTimeout(400).catch(() => {});
+        const popupPage = await popupPromise;
+        if (popupPage) {
+          activePage = popupPage;
+          await activePage.bringToFront().catch(() => {});
+        } else {
+          await activePage.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+        }
+        await activePage.waitForTimeout(500).catch(() => {});
+        continue;
+      }
       await activePage.waitForTimeout(600).catch(() => {});
       continue;
     }
@@ -248,17 +353,31 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
     }
 
     if (decision.action === "SKIP_STEP") {
-      await page.waitForTimeout(1400).catch(() => {});
+      await activePage.waitForTimeout(1400).catch(() => {});
       continue;
     }
+
+    const slackOpts = { belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK };
 
     if (decision.action === "CLICK") {
       const { frame, localIndex } = targets[decision.index];
       const popupPromise = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
-      const clickRes = await clickGatheredIndex(frame, localIndex);
+      const clickRes = await clickGatheredIndex(frame, localIndex, slackOpts);
       if (!clickRes?.ok) {
         bus.emit("event", { type: "OPENAI_TASK_CLICK_FAIL", label: clickRes?.error || "click failed" });
         await popupPromise.catch(() => {});
+        const pFb = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
+        if (await tryPlaywrightFallbackNext(activePage, bus, taskLabel)) {
+          await activePage.waitForTimeout(400).catch(() => {});
+          const popupPage2 = await pFb;
+          if (popupPage2) {
+            activePage = popupPage2;
+            await activePage.bringToFront().catch(() => {});
+          } else {
+            await activePage.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+          }
+          await activePage.waitForTimeout(500).catch(() => {});
+        }
         continue;
       }
 
