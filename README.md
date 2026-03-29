@@ -58,6 +58,12 @@ This is a first-run scaffold. After you do one run and share the streamed output
 - the click-through strategy per task type
 - the phone-related skip detection (keywords + form detection)
 
+## OpenAI navigator (recommended)
+
+When **`OPENAI_API_KEY`** is set and **`OPENAI_NAVIGATOR=true`** (default), the bot **does not** rely on fixed keyword lists to pick jobs. It sends the model a **numbered list of visible links/buttons** plus a page text excerpt; the model returns **one JSON action** per step: `CLICK` (by index), `NAVIGATE` (Microworkers URLs only), `SKIP_STEP`, or `DONE`.
+
+Inside an opened job, the existing step loop (plus phone classification) still runs. Set **`OPENAI_NAVIGATOR=false`** to use the older keyword-based candidate matcher.
+
 ## CapSolver (optional)
 
 If you set `CAPSOLVER_API_KEY`, the agent will try to solve **Cloudflare Turnstile**, **reCAPTCHA v2**, and **hCaptcha** when they appear (login and task steps). Events are streamed as `CAPSOLVER_*` on the dashboard.

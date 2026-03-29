@@ -5,6 +5,7 @@ const { chromium } = require("playwright");
 const { textLooksLikePhoneTask, formLooksLikePhoneTask } = require("./phoneFilter");
 const { clickIfExists, trimText } = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
+const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 const { emitLoginAnalysis } = require("./loginDiagnostics");
 
@@ -505,103 +506,120 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
       }
     }
 
-    const { candidates, taskClickLocator } = await findTaskCandidates(page, cfg);
-    emit(bus, { type: "TASK_QUEUE", label: `Found ${candidates.length} task candidates` });
-    if (candidates.length === 0) {
-      await emitPageDiagnostics(bus, page, "no task candidates");
-      emit(bus, {
-        type: "TASKS_EMPTY",
-        label:
-          "No task action links matched (Accept/Apply/View job/…). Check Live browser on jobs.php — we may need to adjust selectors for your account layout.",
-      });
-    }
+    const useOpenAINavigator = Boolean(cfg.OPENAI_API_KEY) && cfg.OPENAI_NAVIGATOR;
 
     let completed = 0;
     let skippedPhone = 0;
     let needsManual = 0;
 
-    for (const cand of candidates) {
-      const summaryText = cand.text;
-      const heuristic = textLooksLikePhoneTask(summaryText);
-      const openaiRan = cfg.OPENAI_CLASSIFY_TASKS && cfg.OPENAI_API_KEY;
-
-      let classified = heuristic;
-      if (openaiRan) {
-        classified = await classifyTaskForPhoneRequirement({
-          bus,
-          apiKey: cfg.OPENAI_API_KEY,
-          model: cfg.OPENAI_MODEL,
-          taskText: summaryText,
-          heuristicFallback: () => ({ ...heuristic, confidence: heuristic.requiresPhone ? 0.6 : 0.1 }),
-        });
-      }
-
-      const shouldSkipPhone =
-        (heuristic.requiresPhone && !openaiRan) ||
-        (classified.requiresPhone && (classified.confidence ?? 0) >= cfg.OPENAI_SKIP_CONFIDENCE_THRESHOLD);
-
-      if (shouldSkipPhone) {
-        skippedPhone++;
-        const why = heuristic.requiresPhone ? heuristic.reason : classified.reason;
-        emit(bus, { type: "TASK_SKIP_PHONE", label: `Skipping task: ${why}` });
-        continue;
-      }
-
-      // Click the candidate and capture a potential popup.
-      const locator = taskClickLocator.nth(cand.index);
-      const taskLabel = trimText(summaryText || "Task", 120);
-
-      emit(bus, { type: "TASK_START_ATTEMPT", label: taskLabel });
-
-      let popupPage = null;
-      try {
-        const [newPage] = await Promise.all([
-          context.waitForEvent("page").catch(() => null),
-          locator.click({ timeout: 3000 }),
-        ]);
-        popupPage = newPage;
-      } catch {
-        // If click fails, pause for manual.
-        if (cfg.SAFE_MANUAL_PAUSE) {
-          emit(bus, { type: "MANUAL_PAUSE", label: "Clicking a task candidate failed. Please click it manually in the browser, then click Resume." });
-          await manualGate.waitForResume();
-        }
-        continue;
-      }
-
-      const taskPage = popupPage || page;
-      const result = await completeTask({
-        taskPageOrMain: taskPage,
-        pageMain: page,
+    if (useOpenAINavigator) {
+      emit(bus, {
+        type: "TASK_MODE",
+        label: "OpenAI navigator (picks CLICK index / NAVIGATE from live UI list; set OPENAI_NAVIGATOR=false for keyword mode)",
+      });
+      const navResult = await runOpenAINavigatorJobLoop({
+        page,
         context,
         bus,
         cfg,
-        taskLabel,
+        completeTaskFn: completeTask,
+        jobsQuota: cfg.MAX_TASKS_PER_RUN,
+        manualGate,
       });
+      completed = navResult.completed;
+      skippedPhone = navResult.skippedPhone;
+      needsManual = navResult.needsManual;
+    } else {
+      const { candidates, taskClickLocator } = await findTaskCandidates(page, cfg);
+      emit(bus, { type: "TASK_QUEUE", label: `Found ${candidates.length} task candidates (keyword mode)` });
+      if (candidates.length === 0) {
+        await emitPageDiagnostics(bus, page, "no task candidates");
+        emit(bus, {
+          type: "TASKS_EMPTY",
+          label:
+            "No task action links matched (Accept/Apply/View job/…). Enable OPENAI_NAVIGATOR with OPENAI_API_KEY, or adjust layout in Live browser.",
+        });
+      }
 
-      if (result.status === "completed") completed++;
-      if (result.status === "skipped_phone") skippedPhone++;
-      if (result.status === "needs_manual") {
-        needsManual++;
-        emit(bus, { type: "MANUAL_PAUSE", label: "Task flow needs manual interaction. Complete it in the browser, then click Resume." });
-        if (cfg.SAFE_MANUAL_PAUSE) {
-          await manualGate.waitForResume();
-        } else {
-          emit(bus, { type: "AUTONOMOUS_SKIP_MANUAL", label: "SAFE_MANUAL_PAUSE=false, continuing to next task." });
+      for (const cand of candidates) {
+        const summaryText = cand.text;
+        const heuristic = textLooksLikePhoneTask(summaryText);
+        const openaiRan = cfg.OPENAI_CLASSIFY_TASKS && cfg.OPENAI_API_KEY;
+
+        let classified = heuristic;
+        if (openaiRan) {
+          classified = await classifyTaskForPhoneRequirement({
+            bus,
+            apiKey: cfg.OPENAI_API_KEY,
+            model: cfg.OPENAI_MODEL,
+            taskText: summaryText,
+            heuristicFallback: () => ({ ...heuristic, confidence: heuristic.requiresPhone ? 0.6 : 0.1 }),
+          });
         }
-      }
 
-      // Close popup if used, then try to return to tasks list.
-      if (popupPage) {
-        await popupPage.close().catch(() => {});
-      }
-      await page.bringToFront().catch(() => {});
-      await page.waitForTimeout(1000).catch(() => {});
-      // Attempt to reload tasks list for next task context.
-      try {
-        await page.reload({ waitUntil: "domcontentloaded" });
-      } catch {
-        // ignore
+        const shouldSkipPhone =
+          (heuristic.requiresPhone && !openaiRan) ||
+          (classified.requiresPhone && (classified.confidence ?? 0) >= cfg.OPENAI_SKIP_CONFIDENCE_THRESHOLD);
+
+        if (shouldSkipPhone) {
+          skippedPhone++;
+          const why = heuristic.requiresPhone ? heuristic.reason : classified.reason;
+          emit(bus, { type: "TASK_SKIP_PHONE", label: `Skipping task: ${why}` });
+          continue;
+        }
+
+        const locator = taskClickLocator.nth(cand.index);
+        const taskLabel = trimText(summaryText || "Task", 120);
+
+        emit(bus, { type: "TASK_START_ATTEMPT", label: taskLabel });
+
+        let popupPage = null;
+        try {
+          const [newPage] = await Promise.all([
+            context.waitForEvent("page").catch(() => null),
+            locator.click({ timeout: 3000 }),
+          ]);
+          popupPage = newPage;
+        } catch {
+          if (cfg.SAFE_MANUAL_PAUSE) {
+            emit(bus, { type: "MANUAL_PAUSE", label: "Clicking a task candidate failed. Please click it manually in the browser, then click Resume." });
+            await manualGate.waitForResume();
+          }
+          continue;
+        }
+
+        const taskPage = popupPage || page;
+        const result = await completeTask({
+          taskPageOrMain: taskPage,
+          pageMain: page,
+          context,
+          bus,
+          cfg,
+          taskLabel,
+        });
+
+        if (result.status === "completed") completed++;
+        if (result.status === "skipped_phone") skippedPhone++;
+        if (result.status === "needs_manual") {
+          needsManual++;
+          emit(bus, { type: "MANUAL_PAUSE", label: "Task flow needs manual interaction. Complete it in the browser, then click Resume." });
+          if (cfg.SAFE_MANUAL_PAUSE) {
+            await manualGate.waitForResume();
+          } else {
+            emit(bus, { type: "AUTONOMOUS_SKIP_MANUAL", label: "SAFE_MANUAL_PAUSE=false, continuing to next task." });
+          }
+        }
+
+        if (popupPage) {
+          await popupPage.close().catch(() => {});
+        }
+        await page.bringToFront().catch(() => {});
+        await page.waitForTimeout(1000).catch(() => {});
+        try {
+          await page.reload({ waitUntil: "domcontentloaded" });
+        } catch {
+          // ignore
+        }
       }
     }
 

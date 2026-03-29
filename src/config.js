@@ -10,6 +10,9 @@ const EnvSchema = z.object({
   OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
   OPENAI_CLASSIFY_TASKS: z.coerce.boolean().default(true),
   OPENAI_SKIP_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+  /** Use OpenAI to choose clicks/navigations from a numbered UI list (recommended when OPENAI_API_KEY is set) */
+  OPENAI_NAVIGATOR: z.coerce.boolean().default(true),
+  OPENAI_NAVIGATOR_MAX_STEPS: z.coerce.number().int().positive().default(45),
 
   CAPSOLVER_API_KEY: z.string().min(1).optional(),
   CAPSOLVER_ENABLED: z.coerce.boolean().default(true),
