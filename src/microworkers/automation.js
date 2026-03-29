@@ -10,6 +10,7 @@ const {
   DEFAULT_TASK_UI_EXCLUDE,
 } = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
+const { classifyTaskCompletionForPayment } = require("../openai/completionClassifier");
 const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
 const { emitLoginAnalysis } = require("./loginDiagnostics");
@@ -292,8 +293,8 @@ async function sleep(ms) {
 }
 
 /**
- * Detect real task submission / payout confirmation. Avoid bare words like "success" or "done"
- * that appear in job descriptions, footers, and ads (caused false TASK_COMPLETE).
+ * Keyword fallback when OPENAI_CLASSIFY_COMPLETION is off or no API key.
+ * Avoid bare words like "success" that appear in footers (false TASK_COMPLETE).
  */
 function findTaskCompletionMatch(body, { afterProgressClicks }) {
   const strong = [
@@ -350,16 +351,43 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
 
   const maxSteps = 80;
   let progressClicks = 0;
+  const useOpenAICompletion = Boolean(cfg.OPENAI_API_KEY && cfg.OPENAI_CLASSIFY_COMPLETION);
+  const completionEveryN = Math.max(1, cfg.OPENAI_COMPLETION_EVERY_N_STEPS || 1);
+
   for (let step = 0; step < maxSteps; step++) {
     await trySolveCaptchasOnPage(page, cfg, bus, `${taskLabel} step ${step + 1}`);
     const body = await pageTextDeep(page);
-    const completionRe = findTaskCompletionMatch(body, { afterProgressClicks: progressClicks });
-    if (completionRe) {
-      emit(bus, {
-        type: "TASK_COMPLETE",
-        label: `${taskLabel} — submission detected (${trimText(completionRe.source, 80)})`,
+
+    if (useOpenAICompletion && step % completionEveryN === 0) {
+      const verdict = await classifyTaskCompletionForPayment({
+        bus,
+        apiKey: cfg.OPENAI_API_KEY,
+        model: cfg.OPENAI_MODEL,
+        pageText: body,
+        pageUrl: page.url(),
+        taskLabel,
+        progressClicksSoFar: progressClicks,
       });
-      return { completed: true };
+      if (
+        verdict &&
+        verdict.taskCompletedForPayment &&
+        verdict.confidence >= cfg.OPENAI_COMPLETION_CONFIDENCE_THRESHOLD
+      ) {
+        emit(bus, {
+          type: "TASK_COMPLETE",
+          label: `${taskLabel} — OpenAI completion (conf ${verdict.confidence.toFixed(2)}): ${trimText(verdict.reason, 140)}`,
+        });
+        return { completed: true };
+      }
+    } else if (!useOpenAICompletion) {
+      const completionRe = findTaskCompletionMatch(body, { afterProgressClicks: progressClicks });
+      if (completionRe) {
+        emit(bus, {
+          type: "TASK_COMPLETE",
+          label: `${taskLabel} — keyword fallback (${trimText(completionRe.source, 80)})`,
+        });
+        return { completed: true };
+      }
     }
 
     // If phone-related inputs appear, bail out.

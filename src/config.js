@@ -10,6 +10,11 @@ const EnvSchema = z.object({
   OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
   OPENAI_CLASSIFY_TASKS: z.coerce.boolean().default(true),
   OPENAI_SKIP_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+  /** When true (default) and OPENAI_API_KEY is set, task completion uses OpenAI, not regex on page text */
+  OPENAI_CLASSIFY_COMPLETION: z.coerce.boolean().default(true),
+  OPENAI_COMPLETION_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.72),
+  /** Run completion classifier every N loop steps (1 = each step; raise to save API cost) */
+  OPENAI_COMPLETION_EVERY_N_STEPS: z.coerce.number().int().min(1).max(20).default(1),
   /** Use OpenAI to choose clicks/navigations from a numbered UI list (recommended when OPENAI_API_KEY is set) */
   OPENAI_NAVIGATOR: z.coerce.boolean().default(true),
   /** If unset, defaults to min(2_000_000, MAX_TASKS_PER_RUN * 40) in loadConfigFromEnv */
