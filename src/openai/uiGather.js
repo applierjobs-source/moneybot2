@@ -2,17 +2,19 @@
  * Shared Playwright helpers: collect visible clickables and click by stable index.
  * Works with Page or Frame (same evaluate API).
  *
- * Includes [role="button"] / [role="link"] — many exam UIs use <div role="button">Next</div>.
- *
- * @param {import('@playwright/test').Page | import('@playwright/test').Frame} root
- * @param {{ belowFoldSlack?: number }} [options] — larger slack (e.g. 2800) for task runner after scroll
+ * Task pages often use <a href="#">Next</a> — excluded by default for job listings;
+ * pass allowHashAndJsLinks: true from the task runner.
  */
 
 const CLICKABLE_SELECTOR = [
   'a[href]',
+  'a[role="button"]',
+  'a[role="link"]',
+  'a[onclick]',
   'button',
   'input[type="submit"]',
   'input[type="button"]',
+  'input[type="image"]',
   '[role="button"]',
   '[role="link"]',
 ].join(", ");
@@ -21,9 +23,11 @@ const DEFAULT_BELOW_FOLD_SLACK = 800;
 
 async function gatherInteractiveElements(root, options = {}) {
   const belowFoldSlack = options.belowFoldSlack ?? DEFAULT_BELOW_FOLD_SLACK;
+  const allowHashAndJsLinks = Boolean(options.allowHashAndJsLinks);
   return root.evaluate(
-    ({ selectorList, belowFoldSlack: slack }) => {
+    ({ selectorList, belowFoldSlack: slack, allowHashAndJsLinks: allowHash }) => {
       const CLICKABLE_SELECTOR = selectorList;
+
       const isVisible = (el) => {
         const s = window.getComputedStyle(el);
         if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
@@ -35,13 +39,16 @@ async function gatherInteractiveElements(root, options = {}) {
 
       const seen = new Set();
       const out = [];
-      document.querySelectorAll(CLICKABLE_SELECTOR).forEach((el) => {
+
+      function maybePush(el) {
         if (seen.has(el)) return;
         seen.add(el);
         if (!isVisible(el)) return;
         const tag = el.tagName;
         const href = el.getAttribute("href") || "";
-        if (tag === "A" && (href === "#" || href.startsWith("javascript:"))) return;
+        if (tag === "A" && !allowHash) {
+          if (href === "#" || href === "" || href.toLowerCase().startsWith("javascript:")) return;
+        }
         const text = (
           el.innerText ||
           el.value ||
@@ -59,18 +66,36 @@ async function gatherInteractiveElements(root, options = {}) {
           text: text || "(no visible text)",
           href: href.slice(0, 280),
         });
+      }
+
+      function collectFromRoot(docOrShadow) {
+        docOrShadow.querySelectorAll(CLICKABLE_SELECTOR).forEach(maybePush);
+      }
+
+      collectFromRoot(document);
+
+      document.querySelectorAll("*").forEach((host) => {
+        if (host.shadowRoot) {
+          collectFromRoot(host.shadowRoot);
+          host.shadowRoot.querySelectorAll("*").forEach((inner) => {
+            if (inner.shadowRoot) collectFromRoot(inner.shadowRoot);
+          });
+        }
       });
+
       return out.slice(0, 100);
     },
-    { selectorList: CLICKABLE_SELECTOR, belowFoldSlack },
+    { selectorList: CLICKABLE_SELECTOR, belowFoldSlack, allowHashAndJsLinks },
   );
 }
 
 async function clickGatheredIndex(root, index, options = {}) {
   const belowFoldSlack = options.belowFoldSlack ?? DEFAULT_BELOW_FOLD_SLACK;
+  const allowHashAndJsLinks = Boolean(options.allowHashAndJsLinks);
   return root.evaluate(
-    ({ selectorList, belowFoldSlack: slack, i }) => {
+    ({ selectorList, belowFoldSlack: slack, allowHashAndJsLinks: allowHash, i }) => {
       const CLICKABLE_SELECTOR = selectorList;
+
       const isVisible = (el) => {
         const s = window.getComputedStyle(el);
         if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
@@ -82,21 +107,39 @@ async function clickGatheredIndex(root, index, options = {}) {
 
       const seen = new Set();
       const els = [];
-      document.querySelectorAll(CLICKABLE_SELECTOR).forEach((el) => {
+
+      function maybePush(el) {
         if (seen.has(el)) return;
         seen.add(el);
         if (!isVisible(el)) return;
         const tag = el.tagName;
         const href = el.getAttribute("href") || "";
-        if (tag === "A" && (href === "#" || href.startsWith("javascript:"))) return;
+        if (tag === "A" && !allowHash) {
+          if (href === "#" || href === "" || href.toLowerCase().startsWith("javascript:")) return;
+        }
         els.push(el);
+      }
+
+      function collectFromRoot(docOrShadow) {
+        docOrShadow.querySelectorAll(CLICKABLE_SELECTOR).forEach(maybePush);
+      }
+
+      collectFromRoot(document);
+      document.querySelectorAll("*").forEach((host) => {
+        if (host.shadowRoot) {
+          collectFromRoot(host.shadowRoot);
+          host.shadowRoot.querySelectorAll("*").forEach((inner) => {
+            if (inner.shadowRoot) collectFromRoot(inner.shadowRoot);
+          });
+        }
       });
+
       const el = els[i];
       if (!el) return { ok: false, error: "index out of range" };
       el.click();
       return { ok: true };
     },
-    { selectorList: CLICKABLE_SELECTOR, belowFoldSlack, i: index },
+    { selectorList: CLICKABLE_SELECTOR, belowFoldSlack, allowHashAndJsLinks, i: index },
   );
 }
 

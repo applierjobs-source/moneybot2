@@ -132,6 +132,41 @@ async function tryPlaywrightFallbackNext(activePage, bus, taskLabel) {
   return false;
 }
 
+/** When gather returns 0, match visible button-like nodes by label text (incl. href=# links). */
+async function tryPlaywrightStructuralActionClick(activePage, bus, taskLabel) {
+  const hasTextRes = [/^next$/i, /^continue$/i, /^proceed$/i, /^submit$/i, /^start$/i];
+  const bases = [
+    "button",
+    "a",
+    'input[type="submit"]',
+    'input[type="button"]',
+    '[role="button"]',
+    '[role="link"]',
+  ];
+  const frames = orderedFrames(activePage);
+  for (const f of frames) {
+    if (f.isDetached()) continue;
+    for (const base of bases) {
+      for (const ht of hasTextRes) {
+        try {
+          const loc = f.locator(base).filter({ hasText: ht }).first();
+          if ((await loc.count()) === 0) continue;
+          await loc.scrollIntoViewIfNeeded({ timeout: 5000 });
+          await loc.click({ timeout: 5000 });
+          bus.emit("event", {
+            type: "OPENAI_TASK_FALLBACK_STRUCTURAL",
+            label: `${trimText(taskLabel, 60)} ${base} /${String(ht)}/`,
+          });
+          return true;
+        } catch {
+          // try next
+        }
+      }
+    }
+  }
+  return false;
+}
+
 async function askTaskStepDecision({
   page,
   bus,
@@ -170,7 +205,7 @@ async function askTaskStepDecision({
     "TASK_DONE: page clearly shows THIS task is finished for payment (proof accepted, submitted, you will be paid, already completed this task). Include confidence 0-1.",
     "NEEDS_MANUAL: only if automation cannot proceed safely (captcha unsolved, must type free text, upload files you cannot describe, ambiguous).",
     "SKIP_STEP: wait / nothing actionable right now / page still loading.",
-    "If the interactive list is empty, never CLICK — use SKIP_STEP or NEEDS_MANUAL.",
+    "If the interactive list is empty, the run may still recover without you — prefer NEEDS_MANUAL over endless SKIP_STEP if the page clearly needs a human.",
     "Schema:",
     '{"action":"CLICK","index":number,"reason":"string"}',
     '{"action":"TASK_DONE","reason":"string","confidence":number}',
@@ -243,6 +278,7 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
   const uiCap = Math.min(120, Math.max(40, cfg.OPENAI_TASK_UI_ELEMENTS_MAX ?? 100));
 
   let activePage = page;
+  let zeroUiSkipStreak = 0;
 
   for (let step = 0; step < maxSteps; step++) {
     await trySolveCaptchasOnPage(activePage, cfg, bus, `${taskLabel} AI-task ${step + 1}`);
@@ -258,9 +294,50 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
     await activePage.waitForTimeout(200).catch(() => {});
 
     const bodyExcerpt = await pageTextDeep(activePage);
-    const gatherOpts = { belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK };
-    const { lines, targets } = await gatherFlattenedUi(activePage, uiCap, gatherOpts);
-    const nTargets = targets.length;
+    const gatherOpts = {
+      belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK,
+      allowHashAndJsLinks: true,
+    };
+    let gathered = await gatherFlattenedUi(activePage, uiCap, gatherOpts);
+    let { lines, targets } = gathered;
+    if (lines.length === 0) {
+      bus.emit("event", {
+        type: "OPENAI_TASK_ZERO_UI_REGATHER",
+        label: "0 controls after scroll — second pass + hash/javascript links enabled",
+      });
+      await scrollTaskSurfaces(activePage);
+      await activePage.waitForTimeout(350).catch(() => {});
+      gathered = await gatherFlattenedUi(activePage, uiCap, gatherOpts);
+      lines = gathered.lines;
+      targets = gathered.targets;
+    }
+    let nTargets = targets.length;
+
+    if (lines.length === 0) {
+      bus.emit("event", {
+        type: "OPENAI_TASK_ZERO_UI_FALLBACKS",
+        label: "Playwright getByRole + structural text match (before OpenAI)",
+      });
+      const popupPromise = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
+      const clicked =
+        (await tryPlaywrightFallbackNext(activePage, bus, taskLabel)) ||
+        (await tryPlaywrightStructuralActionClick(activePage, bus, taskLabel));
+      if (clicked) {
+        zeroUiSkipStreak = 0;
+        await activePage.waitForTimeout(400).catch(() => {});
+        const popupPage = await popupPromise;
+        if (popupPage) {
+          activePage = popupPage;
+          await activePage.bringToFront().catch(() => {});
+        } else {
+          await activePage.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+        }
+        await activePage.waitForTimeout(500).catch(() => {});
+        continue;
+      }
+    }
+
+    nTargets = targets.length;
 
     let decision;
     let repairMessage = null;
@@ -353,11 +430,28 @@ async function runOpenAITaskRunnerLoop({ page, context, bus, cfg, taskLabel }) {
     }
 
     if (decision.action === "SKIP_STEP") {
+      if (nTargets === 0) {
+        zeroUiSkipStreak++;
+        if (zeroUiSkipStreak >= 3) {
+          bus.emit("event", {
+            type: "TASK_NEEDS_MANUAL",
+            label: `${taskLabel}: No interactive controls after scroll/hash links + ${zeroUiSkipStreak} SKIP_STEP with empty UI.`,
+          });
+          return { completed: false, skippedPhone: false, needsManual: true };
+        }
+      } else {
+        zeroUiSkipStreak = 0;
+      }
       await activePage.waitForTimeout(1400).catch(() => {});
       continue;
     }
 
-    const slackOpts = { belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK };
+    zeroUiSkipStreak = 0;
+
+    const slackOpts = {
+      belowFoldSlack: TASK_GATHER_BELOW_FOLD_SLACK,
+      allowHashAndJsLinks: true,
+    };
 
     if (decision.action === "CLICK") {
       const { frame, localIndex } = targets[decision.index];
