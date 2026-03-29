@@ -18,20 +18,26 @@ function textLooksLikePhoneTask(text) {
 }
 
 async function formLooksLikePhoneTask(page) {
-  // Detect phone inputs dynamically inside the task page.
-  const phoneInputCount = await page
-    .locator('input[type="tel"], input[name*="phone" i], input[id*="phone" i]')
-    .count();
-  if (phoneInputCount > 0) return { requiresPhone: true, reason: "phone input field detected" };
+  // Detect phone inputs in any frame (task UIs often sit in iframes).
+  for (const f of page.frames()) {
+    if (f.isDetached()) continue;
+    const phoneInputCount = await f
+      .locator('input[type="tel"], input[name*="phone" i], input[id*="phone" i]')
+      .count();
+    if (phoneInputCount > 0) return { requiresPhone: true, reason: "phone input field detected" };
 
-  // Some flows label the input with "phone" even if type isn't tel.
-  const phoneLabelCount = await page
-    .locator('label:has-text("phone"), label:has-text("mobile"), label:has-text("tel")')
-    .count();
-  if (phoneLabelCount > 0) return { requiresPhone: true, reason: "phone-labeled input detected" };
+    const phoneLabelCount = await f
+      .locator('label:has-text("phone"), label:has-text("mobile"), label:has-text("tel")')
+      .count();
+    if (phoneLabelCount > 0) return { requiresPhone: true, reason: "phone-labeled input detected" };
+  }
 
-  const body = await page.locator("body").innerText();
-  return textLooksLikePhoneTask(body);
+  const parts = [];
+  for (const f of page.frames()) {
+    if (f.isDetached()) continue;
+    parts.push(await f.locator("body").innerText().catch(() => ""));
+  }
+  return textLooksLikePhoneTask(parts.join("\n"));
 }
 
 module.exports = { textLooksLikePhoneTask, formLooksLikePhoneTask };

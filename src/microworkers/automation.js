@@ -54,6 +54,41 @@ async function pageText(page) {
   }
 }
 
+/** All non-detached frames (main first) — task flows often use iframes. */
+function orderedFrames(page) {
+  const main = page.mainFrame();
+  return [main, ...page.frames().filter((f) => !f.isDetached() && f !== main)];
+}
+
+async function pageTextDeep(page) {
+  const parts = [];
+  for (const f of page.frames()) {
+    if (f.isDetached()) continue;
+    parts.push(await f.locator("body").innerText().catch(() => ""));
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+async function tryCheckAgreementCheckboxesInRoot(root, bus, taskLabel) {
+  const forms = root.locator("form");
+  const n = await forms.count();
+  for (let i = 0; i < Math.min(n, 20); i++) {
+    const form = forms.nth(i);
+    const t = await form.innerText().catch(() => "");
+    if (!/\b(agree|terms|conditions?|accept|i\s+have\s+read|i\s+understand|confirm)\b/i.test(t)) continue;
+    const unchecked = form.locator('input[type="checkbox"]:not(:checked)');
+    const c = await unchecked.count();
+    for (let j = 0; j < c; j++) {
+      try {
+        await unchecked.nth(j).check({ timeout: 2000 });
+        emit(bus, { type: "STEP", label: `${taskLabel}: checked agreement checkbox` });
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 async function emitPageDiagnostics(bus, page, tag) {
   const url = page.url();
   let title = "";
@@ -253,23 +288,25 @@ async function sleep(ms) {
 
 async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
   const actionPriority = [
-    /continue|next|proceed|go\s+to\s+next/i,
-    /start|begin|get\s+started/i,
-    /i agree|agree|accept(\s+job|\s+task)?/i,
-    /submit(\s+proof|\s+task|\s+work)?|send\s+proof|upload\s+proof/i,
-    /finish|mark\s+as\s+done|i\s+completed|task\s+complete/i,
-    /confirm|verify(\s+and)?\s+continue/i,
-    /apply|participate|i\s+confirm|take\s+this\s+job/i,
+    /continue|next|proceed|go\s+to\s+next|move\s+on/i,
+    /start|begin|get\s+started|launch|open\s+task|work\s+on\s+this/i,
+    /i\s+agree|agree|accept(\s+job|\s+task|\s+and)?|accept\s+terms/i,
+    /submit(\s+proof|\s+task|\s+work)?|send\s+proof|upload\s+proof|post\s+proof/i,
+    /finish|mark\s+as\s+done|i\s+completed|task\s+complete|job\s+complete/i,
+    /confirm|verify(\s+and)?\s+continue|yes,?\s*i\s+confirm/i,
+    /apply|participate|i\s+confirm|take\s+this\s+job|join(\s+now)?/i,
     /rate|stars?|thumbs?\s+up/i,
-    /visit\s+(website|site|link)|open\s+link|go\s+to\s+website/i,
+    /visit\s+(website|site|link)|open\s+link|go\s+to\s+website|click\s+here\s+to\s+start/i,
+    /\bok\b|\bokay\b|got\s+it|understood/i,
+    /save(\s+and)?\s+continue|done\s+with\s+step/i,
   ];
 
   const maxSteps = 80;
   for (let step = 0; step < maxSteps; step++) {
     await trySolveCaptchasOnPage(page, cfg, bus, `${taskLabel} step ${step + 1}`);
-    const body = await pageText(page);
+    const body = await pageTextDeep(page);
     if (
-      /\b(done|completed|success|submitted|thank\s+you|task\s+submitted|proof\s+accepted|you\s+will\s+be\s+paid|successfully\s+submitted|already\s+submitted)\b/i.test(
+      /\b(done|completed|success|submitted|thank\s+you|task\s+submitted|proof\s+accepted|you\s+will\s+be\s+paid|successfully\s+submitted|already\s+submitted|congratulations|approved)\b/i.test(
         body,
       )
     ) {
@@ -284,48 +321,76 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
       return { completed: false, skippedPhone: true };
     }
 
+    const frames = orderedFrames(page);
+    for (const root of frames) {
+      await tryCheckAgreementCheckboxesInRoot(root, bus, taskLabel);
+    }
+
     let clickedAny = false;
-    for (const re of actionPriority) {
-      const res = await clickIfExists({ page, bus, textRegex: re, timeoutMs: 1400, actionName: "TASK_ACTION" });
-      if (res.clicked) {
-        clickedAny = true;
-        emit(bus, { type: "STEP", label: `${taskLabel}: clicked ${re}` });
-        await sleep(1400);
-        break;
+    const framesNow = orderedFrames(page);
+    for (const root of framesNow) {
+      for (const re of actionPriority) {
+        const res = await clickIfExists({
+          page: root,
+          bus,
+          textRegex: re,
+          timeoutMs: 1400,
+          actionName: "TASK_ACTION",
+        });
+        if (res.clicked) {
+          clickedAny = true;
+          emit(bus, { type: "STEP", label: `${taskLabel}: clicked ${re} (frame)` });
+          await sleep(1400);
+          break;
+        }
       }
+      if (clickedAny) break;
     }
 
     if (!clickedAny) {
-      for (const re of actionPriority) {
-        const tryRole = async (role) => {
-          const loc = page.getByRole(role, { name: re }).first();
-          if ((await loc.count()) === 0) return false;
-          try {
-            await loc.waitFor({ state: "visible", timeout: 1200 });
-            const label = await safeGetInnerText(loc);
-            emit(bus, { type: "TASK_ACTION", label: trimText(label, 120), textRegex: String(re) });
-            await loc.click({ timeout: 1200 });
-            return true;
-          } catch {
-            return false;
+      for (const root of framesNow) {
+        for (const re of actionPriority) {
+          const tryRole = async (role) => {
+            const loc = root.getByRole(role, { name: re }).first();
+            if ((await loc.count()) === 0) return false;
+            try {
+              await loc.waitFor({ state: "visible", timeout: 1200 });
+              const label = await safeGetInnerText(loc);
+              emit(bus, { type: "TASK_ACTION", label: trimText(label, 120), textRegex: String(re) });
+              await loc.click({ timeout: 1200 });
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          if (await tryRole("button")) {
+            clickedAny = true;
+            emit(bus, { type: "STEP", label: `${taskLabel}: role=button ${re} (frame)` });
+            await sleep(1400);
+            break;
           }
-        };
-        if (await tryRole("button")) {
-          clickedAny = true;
-          emit(bus, { type: "STEP", label: `${taskLabel}: role=button ${re}` });
-          await sleep(1400);
-          break;
+          if (await tryRole("link")) {
+            clickedAny = true;
+            emit(bus, { type: "STEP", label: `${taskLabel}: role=link ${re} (frame)` });
+            await sleep(1400);
+            break;
+          }
         }
-        if (await tryRole("link")) {
-          clickedAny = true;
-          emit(bus, { type: "STEP", label: `${taskLabel}: role=link ${re}` });
-          await sleep(1400);
-          break;
-        }
+        if (clickedAny) break;
       }
     }
 
-    if (!clickedAny) return { completed: false, skippedPhone: false };
+    if (clickedAny) {
+      await page.waitForLoadState("domcontentloaded", { timeout: 12000 }).catch(() => {});
+      await sleep(400);
+      continue;
+    }
+
+    emit(bus, {
+      type: "TASK_NO_CTA_FOUND",
+      label: `${taskLabel}: No Continue/Submit-style control in any frame (step ${step + 1}).`,
+    });
+    return { completed: false, skippedPhone: false };
   }
 
   return { completed: false, skippedPhone: false };
@@ -337,7 +402,7 @@ async function completeTask({ taskPageOrMain, pageMain, context, bus, cfg, taskL
 
   emit(bus, { type: "TASK_OPEN", label: taskLabel });
 
-  const body = await pageText(page);
+  const body = await pageTextDeep(page);
   const heuristic = textLooksLikePhoneTask(body);
   let classifiedPhone = { requiresPhone: false, reason: "not classified", confidence: 0 };
   if (cfg.OPENAI_CLASSIFY_TASKS && cfg.OPENAI_API_KEY) {
@@ -363,6 +428,10 @@ async function completeTask({ taskPageOrMain, pageMain, context, bus, cfg, taskL
   const res = await clickContinueLoop({ page, bus, cfg, taskLabel });
   if (res.completed) return { status: "completed" };
   if (res.skippedPhone) return { status: "skipped_phone" };
+  emit(bus, {
+    type: "TASK_NEEDS_MANUAL",
+    label: `${taskLabel}: Heuristic clicks exhausted (iframes/custom widgets). ${trimText(page.url(), 140)}`,
+  });
   return { status: "needs_manual" };
 }
 

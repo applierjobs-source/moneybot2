@@ -160,6 +160,7 @@ async function askNavigatorDecision({
     "Pick ONE next step as strict JSON only (no markdown).",
     "Goals: reach available jobs, open a suitable job, avoid phone/SMS/OTP/voice verification tasks.",
     "Prefer actions that clearly start or accept work: Accept, Apply, Participate, View job, Start, Continue, etc.",
+    "For CLICK, the reason field must name the control you are clicking (e.g. \"View job\"), not a phone/SMS suitability essay — suitability is checked later by automation.",
     "Avoid: Logout, Login (user is already logged in), Blog, social, Terms/Privacy unless needed to unblock.",
     "Never CLICK an index marked ALREADY_TRIED — those jobs were already opened this run or failed to navigate; choose a different job or NAVIGATE to jobs.php to refresh.",
     "If the list has no good option, return SKIP_STEP with a short reason.",
