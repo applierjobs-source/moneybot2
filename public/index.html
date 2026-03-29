@@ -97,7 +97,7 @@
     <div class="row">
       <div>Microworkers agent — live desktop + event log</div>
       <div style="flex: 1"></div>
-      <button id="resumeBtn" disabled>Resume</button>
+      <button id="resumeBtn" type="button" disabled>Resume</button>
     </div>
 
     <div class="layout">
@@ -167,6 +167,26 @@
           .replaceAll("'", "&#039;");
       }
 
+      function setResumeEnabled(canResume) {
+        resumeBtn.disabled = !canResume;
+        resumeBtn.title = canResume
+          ? "Send resume to the automation (after manual login or captcha)."
+          : "Resume is only needed when the agent is paused (MANUAL_PAUSE in the log).";
+      }
+
+      async function syncPauseFromServer() {
+        try {
+          const r = await fetch("/pause-status");
+          if (!r.ok) return;
+          const s = await r.json();
+          setResumeEnabled(Boolean(s.awaitingResume));
+        } catch {
+          // keep current state
+        }
+      }
+
+      syncPauseFromServer();
+
       const es = new EventSource("/events");
       es.onmessage = (m) => {
         let payload;
@@ -177,17 +197,33 @@
         }
         addEntry(payload);
 
-        if (payload?.type === "MANUAL_PAUSE" || payload?.type === "MANUAL_RESUME") {
-          resumeBtn.disabled = payload?.type !== "MANUAL_PAUSE";
+        if (payload?.type === "CONNECTED") {
+          syncPauseFromServer();
+          return;
+        }
+        if (payload?.type === "MANUAL_PAUSE") {
+          setResumeEnabled(true);
+          return;
+        }
+        if (payload?.type === "MANUAL_RESUME") {
+          setResumeEnabled(false);
         }
       };
       es.onerror = () => {
         addEntry({ type: "SSE_ERROR", label: "Disconnected from event stream. Check server logs and reload." });
+        syncPauseFromServer();
       };
 
       resumeBtn.addEventListener("click", async () => {
-        resumeBtn.disabled = true;
-        await fetch("/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        try {
+          const r = await fetch("/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          const data = r.ok ? await r.json().catch(() => ({})) : {};
+          setResumeEnabled(Boolean(data.awaitingResume));
+          if (!r.ok) addEntry({ type: "RESUME_HTTP_ERROR", label: `POST /resume failed (${r.status})` });
+        } catch (e) {
+          addEntry({ type: "RESUME_ERROR", label: String(e?.message || e) });
+          await syncPauseFromServer();
+        }
       });
     </script>
   </body>

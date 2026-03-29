@@ -12,7 +12,8 @@ const EnvSchema = z.object({
   OPENAI_SKIP_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
   /** Use OpenAI to choose clicks/navigations from a numbered UI list (recommended when OPENAI_API_KEY is set) */
   OPENAI_NAVIGATOR: z.coerce.boolean().default(true),
-  OPENAI_NAVIGATOR_MAX_STEPS: z.coerce.number().int().positive().default(45),
+  /** If unset, defaults to min(2_000_000, MAX_TASKS_PER_RUN * 40) in loadConfigFromEnv */
+  OPENAI_NAVIGATOR_MAX_STEPS: z.coerce.number().int().positive().optional(),
 
   CAPSOLVER_API_KEY: z.string().min(1).optional(),
   CAPSOLVER_ENABLED: z.coerce.boolean().default(true),
@@ -29,7 +30,7 @@ const EnvSchema = z.object({
   STREAM_PORT: z.coerce.number().int().positive().optional(),
   PORT: z.coerce.number().int().positive().optional(),
 
-  MAX_TASKS_PER_RUN: z.coerce.number().int().positive().default(5),
+  MAX_TASKS_PER_RUN: z.coerce.number().int().positive().default(45000),
 
   // If true, we pause when the flow isn't understood instead of trying risky guesses.
   SAFE_MANUAL_PAUSE: z.coerce.boolean().default(false),
@@ -43,7 +44,14 @@ function loadConfigFromEnv() {
     fs.mkdirSync(storageDir, { recursive: true });
   }
   const streamPort = cfg.STREAM_PORT ?? cfg.PORT ?? 3000;
-  return { ...cfg, STORAGE_STATE_PATH: resolvedStoragePath, STREAM_PORT: streamPort };
+  const openaiNavMax =
+    cfg.OPENAI_NAVIGATOR_MAX_STEPS ?? Math.min(2_000_000, Math.max(500, cfg.MAX_TASKS_PER_RUN * 40));
+  return {
+    ...cfg,
+    STORAGE_STATE_PATH: resolvedStoragePath,
+    STREAM_PORT: streamPort,
+    OPENAI_NAVIGATOR_MAX_STEPS: openaiNavMax,
+  };
 }
 
 module.exports = { loadConfigFromEnv };

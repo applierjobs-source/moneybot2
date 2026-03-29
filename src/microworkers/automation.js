@@ -3,7 +3,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 
 const { textLooksLikePhoneTask, formLooksLikePhoneTask } = require("./phoneFilter");
-const { clickIfExists, trimText } = require("../utils/playwrightHelpers");
+const { clickIfExists, trimText, safeGetInnerText } = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
 const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
@@ -253,19 +253,26 @@ async function sleep(ms) {
 
 async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
   const actionPriority = [
-    /continue|next/i,
-    /start|begin/i,
+    /continue|next|proceed|go\s+to\s+next/i,
+    /start|begin|get\s+started/i,
     /i agree|agree|accept(\s+job|\s+task)?/i,
-    /submit(\s+proof|\s+task)?|finish|done/i,
-    /confirm/i,
-    /apply|participate|i\s+confirm/i,
+    /submit(\s+proof|\s+task|\s+work)?|send\s+proof|upload\s+proof/i,
+    /finish|mark\s+as\s+done|i\s+completed|task\s+complete/i,
+    /confirm|verify(\s+and)?\s+continue/i,
+    /apply|participate|i\s+confirm|take\s+this\s+job/i,
+    /rate|stars?|thumbs?\s+up/i,
+    /visit\s+(website|site|link)|open\s+link|go\s+to\s+website/i,
   ];
 
-  const maxSteps = 20;
+  const maxSteps = 80;
   for (let step = 0; step < maxSteps; step++) {
     await trySolveCaptchasOnPage(page, cfg, bus, `${taskLabel} step ${step + 1}`);
     const body = await pageText(page);
-    if (/\b(done|completed|success)\b/i.test(body)) {
+    if (
+      /\b(done|completed|success|submitted|thank\s+you|task\s+submitted|proof\s+accepted|you\s+will\s+be\s+paid|successfully\s+submitted|already\s+submitted)\b/i.test(
+        body,
+      )
+    ) {
       emit(bus, { type: "TASK_COMPLETE", label: `${taskLabel} marked complete` });
       return { completed: true };
     }
@@ -279,12 +286,42 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
 
     let clickedAny = false;
     for (const re of actionPriority) {
-      const res = await clickIfExists({ page, bus, textRegex: re, timeoutMs: 800, actionName: "TASK_ACTION" });
+      const res = await clickIfExists({ page, bus, textRegex: re, timeoutMs: 1400, actionName: "TASK_ACTION" });
       if (res.clicked) {
         clickedAny = true;
         emit(bus, { type: "STEP", label: `${taskLabel}: clicked ${re}` });
-        await sleep(1200);
+        await sleep(1400);
         break;
+      }
+    }
+
+    if (!clickedAny) {
+      for (const re of actionPriority) {
+        const tryRole = async (role) => {
+          const loc = page.getByRole(role, { name: re }).first();
+          if ((await loc.count()) === 0) return false;
+          try {
+            await loc.waitFor({ state: "visible", timeout: 1200 });
+            const label = await safeGetInnerText(loc);
+            emit(bus, { type: "TASK_ACTION", label: trimText(label, 120), textRegex: String(re) });
+            await loc.click({ timeout: 1200 });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        if (await tryRole("button")) {
+          clickedAny = true;
+          emit(bus, { type: "STEP", label: `${taskLabel}: role=button ${re}` });
+          await sleep(1400);
+          break;
+        }
+        if (await tryRole("link")) {
+          clickedAny = true;
+          emit(bus, { type: "STEP", label: `${taskLabel}: role=link ${re}` });
+          await sleep(1400);
+          break;
+        }
       }
     }
 

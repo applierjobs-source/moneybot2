@@ -16,7 +16,7 @@ function trimText(text, max = 2500) {
 async function clickIfExists({ page, bus, textRegex, timeoutMs = 1200, actionName = "CLICK" }) {
   // Attempts a text-based click across common clickable elements.
   const locator = page
-    .locator("button, a, input[type='submit']")
+    .locator("button, a, input[type='submit'], input[type='button']")
     .filter({ hasText: textRegex })
     .first();
 

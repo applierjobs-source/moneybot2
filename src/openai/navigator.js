@@ -21,6 +21,41 @@ function isAllowedNavigateUrl(urlStr) {
   }
 }
 
+function urlKey(raw) {
+  try {
+    const u = new URL(raw);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** Stable key for a listing link so we do not reopen the same job after returning from it. */
+function resolveListingHrefKey(basePageUrl, hrefAttr) {
+  if (!hrefAttr || hrefAttr === "#" || hrefAttr.startsWith("javascript:")) return null;
+  try {
+    const u = new URL(hrefAttr, basePageUrl);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+function addDeadClickIndex(deadClickByListingUrl, listingPageUrl, index) {
+  const k = urlKey(listingPageUrl);
+  if (!k) return;
+  if (!deadClickByListingUrl.has(k)) deadClickByListingUrl.set(k, new Set());
+  deadClickByListingUrl.get(k).add(index);
+}
+
+function blockedIndicesForListingUrl(deadClickByListingUrl, listingPageUrl) {
+  const k = urlKey(listingPageUrl);
+  if (!k) return [];
+  return [...(deadClickByListingUrl.get(k) || [])].sort((a, b) => a - b);
+}
+
 async function gatherInteractiveElements(page) {
   return page.evaluate(() => {
     const isVisible = (el) => {
@@ -84,7 +119,17 @@ async function clickGatheredIndex(page, index) {
   }, index);
 }
 
-async function askNavigatorDecision({ page, bus, cfg, bodyExcerpt, elements, jobsDone, jobsQuota }) {
+async function askNavigatorDecision({
+  page,
+  bus,
+  cfg,
+  bodyExcerpt,
+  elements,
+  jobsDone,
+  jobsQuota,
+  attemptedKeys,
+  blockedIndices,
+}) {
   if (!cfg.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY required for navigator");
 
   const client = new OpenAI({ apiKey: cfg.OPENAI_API_KEY });
@@ -96,7 +141,19 @@ async function askNavigatorDecision({ page, bus, cfg, bodyExcerpt, elements, job
     title = "";
   }
 
-  const lines = elements.map((e, i) => `[${i}] <${e.tag}> "${e.text}"${e.href ? ` href=${e.href}` : ""}`);
+  const lines = elements.map((e, i) => {
+    const hk = resolveListingHrefKey(url, e.href || "");
+    const triedHref = hk && attemptedKeys.has(hk);
+    const triedIdx = blockedIndices.includes(i);
+    const mark = triedHref || triedIdx ? " [ALREADY_TRIED—pick another index or SKIP_STEP] " : " ";
+    return `[${i}]${mark}<${e.tag}> "${e.text}"${e.href ? ` href=${e.href}` : ""}`;
+  });
+
+  const triedSample = [...attemptedKeys]
+    .filter((k) => !k.includes("#clickidx"))
+    .slice(-40)
+    .map((k) => trimText(k, 120));
+  const triedExtra = Math.max(0, [...attemptedKeys].filter((k) => !k.includes("#clickidx")).length - triedSample.length);
 
   const system = [
     "You are a browser automation planner for Microworkers (worker side).",
@@ -104,6 +161,7 @@ async function askNavigatorDecision({ page, bus, cfg, bodyExcerpt, elements, job
     "Goals: reach available jobs, open a suitable job, avoid phone/SMS/OTP/voice verification tasks.",
     "Prefer actions that clearly start or accept work: Accept, Apply, Participate, View job, Start, Continue, etc.",
     "Avoid: Logout, Login (user is already logged in), Blog, social, Terms/Privacy unless needed to unblock.",
+    "Never CLICK an index marked ALREADY_TRIED — those jobs were already opened this run or failed to navigate; choose a different job or NAVIGATE to jobs.php to refresh.",
     "If the list has no good option, return SKIP_STEP with a short reason.",
     "If enough jobs have been handled for this session or the page has no work left, return DONE.",
     "For NAVIGATE, only use URLs on microworkers.com (e.g. https://www.microworkers.com/jobs.php).",
@@ -114,7 +172,7 @@ async function askNavigatorDecision({ page, bus, cfg, bodyExcerpt, elements, job
     '{"action":"SKIP_STEP","reason":"string"}',
   ].join(" ");
 
-  const user = [
+  const userParts = [
     `Current URL: ${url}`,
     `Title: ${title}`,
     `Jobs handled this run (opened + classified): ${jobsDone} / quota ${jobsQuota}`,
@@ -124,7 +182,14 @@ async function askNavigatorDecision({ page, bus, cfg, bodyExcerpt, elements, job
     "",
     "Interactive elements (indices are stable for CLICK):",
     lines.join("\n") || "(none)",
-  ].join("\n");
+  ];
+  if (triedSample.length) {
+    userParts.push("", `Job/listing URLs already used this run (sample; ${triedExtra} more not shown):`, triedSample.join("\n"));
+  }
+  if (blockedIndices.length) {
+    userParts.push("", `Do not CLICK these indices (unproductive clicks on this page): ${blockedIndices.join(", ")}`);
+  }
+  const user = userParts.join("\n");
 
   bus.emit("event", { type: "OPENAI_NAV_ASK", label: `Model=${cfg.OPENAI_MODEL} elements=${elements.length}` });
 
@@ -169,6 +234,18 @@ async function runOpenAINavigatorJobLoop({
   /** Count every job page we attempted (complete or skip) toward quota */
   let jobsHandled = 0;
   let step = 0;
+  const attemptedKeys = new Set();
+  const deadClickByListingUrl = new Map();
+  let skipStreak = 0;
+
+  const returnToJobs = async () => {
+    try {
+      await page.goto(`${new URL(cfg.MICROWORKERS_BASE_URL).origin}/jobs.php`, { waitUntil: "domcontentloaded" });
+    } catch {
+      // ignore
+    }
+    await trySolveCaptchasOnPage(page, cfg, bus, "openai nav return jobs");
+  };
 
   while (jobsHandled < jobsQuota && step < maxSteps) {
     step++;
@@ -180,6 +257,8 @@ async function runOpenAINavigatorJobLoop({
     }
 
     const bodyExcerpt = await page.locator("body").innerText().catch(() => "");
+    const listingUrlForPrompt = page.url();
+    const blockedIndices = blockedIndicesForListingUrl(deadClickByListingUrl, listingUrlForPrompt);
     let decision;
     try {
       decision = await askNavigatorDecision({
@@ -190,6 +269,8 @@ async function runOpenAINavigatorJobLoop({
         elements,
         jobsDone: jobsHandled,
         jobsQuota,
+        attemptedKeys,
+        blockedIndices,
       });
     } catch (err) {
       bus.emit("event", { type: "OPENAI_NAV_ERROR", label: trimText(String(err?.message || err), 300) });
@@ -198,9 +279,24 @@ async function runOpenAINavigatorJobLoop({
 
     if (decision.action === "DONE") break;
     if (decision.action === "SKIP_STEP") {
+      skipStreak++;
+      if (
+        skipStreak >= 5 &&
+        /microworkers\.com/i.test(page.url()) &&
+        /jobs\.php/i.test(page.url())
+      ) {
+        skipStreak = 0;
+        await page.mouse.wheel(0, 700).catch(() => {});
+        bus.emit("event", {
+          type: "OPENAI_NAV_SCROLL_JOBS",
+          label: "Scrolled jobs listing after repeated SKIP_STEP",
+        });
+      }
       await page.waitForTimeout(1200).catch(() => {});
       continue;
     }
+
+    skipStreak = 0;
 
     if (decision.action === "NAVIGATE") {
       if (!isAllowedNavigateUrl(decision.url)) {
@@ -218,7 +314,26 @@ async function runOpenAINavigatorJobLoop({
         continue;
       }
 
+      if (blockedIndices.includes(decision.index)) {
+        bus.emit("event", {
+          type: "OPENAI_NAV_BLOCKED_INDEX",
+          label: `Model chose blocked index ${decision.index}`,
+        });
+        continue;
+      }
+
       const prevUrl = page.url();
+      const chosen = elements[decision.index];
+      const listingHrefKey = resolveListingHrefKey(prevUrl, chosen?.href || "");
+
+      if (listingHrefKey && attemptedKeys.has(listingHrefKey)) {
+        bus.emit("event", {
+          type: "OPENAI_NAV_DUPLICATE_BLOCKED",
+          label: trimText(`Blocked duplicate listing: ${listingHrefKey}`, 220),
+        });
+        continue;
+      }
+
       const popupPromise = context.waitForEvent("page", { timeout: 4500 }).catch(() => null);
       const clickRes = await clickGatheredIndex(page, decision.index);
       if (!clickRes?.ok) {
@@ -240,10 +355,27 @@ async function runOpenAINavigatorJobLoop({
       }
 
       const taskPage = popupPage || page;
+      const navigated = popupPage != null || navigatedSameTab;
       const onTaskLike =
         popupPage != null ||
         navigatedSameTab ||
         /job|task|campaign|worker_start|basic|ttv/i.test(taskPage.url());
+
+      const registerAttemptKeys = () => {
+        if (listingHrefKey) attemptedKeys.add(listingHrefKey);
+        const tu = urlKey(taskPage.url());
+        if (tu) attemptedKeys.add(tu);
+      };
+
+      if (!navigated) {
+        if (listingHrefKey) attemptedKeys.add(listingHrefKey);
+        else addDeadClickIndex(deadClickByListingUrl, prevUrl, decision.index);
+        bus.emit("event", {
+          type: "OPENAI_NAV_NO_NAV_AFTER_CLICK",
+          label: trimText(`No navigation; marked tried idx=${decision.index}`, 160),
+        });
+        continue;
+      }
 
       if (onTaskLike) {
         const taskLabel = trimText(`OpenAI step ${step}: ${decision.reason}`, 120);
@@ -256,6 +388,7 @@ async function runOpenAINavigatorJobLoop({
           cfg,
           taskLabel,
         });
+        registerAttemptKeys();
         jobsHandled++;
         if (result.status === "completed") completed++;
         if (result.status === "skipped_phone") skippedPhone++;
@@ -268,11 +401,17 @@ async function runOpenAINavigatorJobLoop({
         }
         if (popupPage) await popupPage.close().catch(() => {});
         await page.bringToFront().catch(() => {});
-        try {
-          await page.goto(`${new URL(cfg.MICROWORKERS_BASE_URL).origin}/jobs.php`, { waitUntil: "domcontentloaded" });
-        } catch {
-          // ignore
-        }
+        await returnToJobs();
+      } else {
+        registerAttemptKeys();
+        jobsHandled++;
+        bus.emit("event", {
+          type: "OPENAI_NAV_NON_TASK_NAV",
+          label: trimText(`Opened non-task page, returning to jobs: ${taskPage.url()}`, 200),
+        });
+        if (popupPage) await popupPage.close().catch(() => {});
+        await page.bringToFront().catch(() => {});
+        await returnToJobs();
       }
     }
   }

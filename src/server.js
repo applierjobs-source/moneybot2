@@ -21,10 +21,15 @@ function createServer({ bus, manualGate, port }) {
     });
   });
 
+  /** Lets the dashboard sync Resume button when SSE was missed (late page load). */
+  app.get("/pause-status", (req, res) => {
+    res.json({ awaitingResume: manualGate.isAwaitingResume() });
+  });
+
   app.post("/resume", (req, res) => {
     manualGate.resume();
     bus.emit("event", { type: "MANUAL_RESUME" });
-    res.json({ ok: true });
+    res.json({ ok: true, awaitingResume: manualGate.isAwaitingResume() });
   });
 
   app.get("/events", (req, res) => {
