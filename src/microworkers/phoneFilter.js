@@ -1,12 +1,12 @@
 // Heuristic filters to avoid tasks that require phone/SMS/OTP flows.
 
+// Avoid generic "verify" — most Microworkers tasks ask you to verify proof; that is not phone/SMS.
 const KEYWORD_RULES = [
-  { re: /\b(phone|mobile|cell(?:ular)?)\b/i, reason: "mentions phone/mobile" },
-  { re: /\b(telephone|tel)\b/i, reason: "mentions telephone/tel" },
-  { re: /\b(sms)\b/i, reason: "mentions SMS" },
-  { re: /\b(otp|one[-\s]?time password|verification code)\b/i, reason: "mentions OTP/verification code" },
-  { re: /\b(verify|verification)\b/i, reason: "mentions verification" },
-  { re: /\b(call|voip|dial)\b/i, reason: "mentions call/dial" },
+  { re: /\b(phone|mobile|cell(?:ular)?)\s*(number|#|no\.?|verification|code|otp)?\b/i, reason: "mentions phone/mobile" },
+  { re: /\b(telephone|tel\.?)\s*(number|no\.?)?\b/i, reason: "mentions telephone/tel" },
+  { re: /\b(sms|text message)\b/i, reason: "mentions SMS/text" },
+  { re: /\b(otp|one[-\s]?time password|sms\s+code|phone\s+code)\b/i, reason: "mentions OTP/SMS code" },
+  { re: /\b(call|voip|dial)\s+(to|me|this|number)?\b/i, reason: "mentions phone call" },
 ];
 
 function textLooksLikePhoneTask(text) {
@@ -30,9 +30,8 @@ async function formLooksLikePhoneTask(page) {
     .count();
   if (phoneLabelCount > 0) return { requiresPhone: true, reason: "phone-labeled input detected" };
 
-  // If the page is explicitly describing SMS verification, treat it as phone-required.
-  const smsText = await page.locator("body").innerText();
-  return textLooksLikePhoneTask(smsText);
+  const body = await page.locator("body").innerText();
+  return textLooksLikePhoneTask(body);
 }
 
 module.exports = { textLooksLikePhoneTask, formLooksLikePhoneTask };

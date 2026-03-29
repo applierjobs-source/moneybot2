@@ -92,6 +92,24 @@ async function detectLoggedIn(page) {
   return false;
 }
 
+async function isLikelyMicroworkersLoginPage(page) {
+  const u = page.url().toLowerCase();
+  if (!u.includes("microworkers.com")) return false;
+  if (u.includes("login.php")) return true;
+  const loginFormBits = await page.locator('#Email, #Password, input[name="Button"][value="Login"]').count();
+  return loginFormBits >= 2;
+}
+
+/** Microworkers pages all say “work” in the footer — don’t use /\bwork\b/ as the jobs signal. */
+async function isLikelyMicroworkersTaskListing(page) {
+  if (!/microworkers\.com/i.test(page.url())) return false;
+  if (await isLikelyMicroworkersLoginPage(page)) return false;
+  const u = page.url().toLowerCase();
+  if (/jobs\.php|worker_start|campaign/i.test(u)) return true;
+  const t = await pageText(page);
+  return /\b(available jobs|browse jobs|job search|basic campaigns|accept job|posted jobs|campaign zone|reward|positions?\s+available)\b/i.test(t);
+}
+
 async function navigateToLogin(page, cfg, bus) {
   emit(bus, { type: "NAVIGATE", label: `Base ${cfg.MICROWORKERS_BASE_URL}` });
   await page.goto(cfg.MICROWORKERS_BASE_URL, { waitUntil: "domcontentloaded" });
@@ -236,9 +254,10 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
   const actionPriority = [
     /continue|next/i,
     /start|begin/i,
-    /i agree|agree|accept/i,
-    /submit|finish|done/i,
+    /i agree|agree|accept(\s+job|\s+task)?/i,
+    /submit(\s+proof|\s+task)?|finish|done/i,
     /confirm/i,
+    /apply|participate|i\s+confirm/i,
   ];
 
   const maxSteps = 20;
@@ -310,19 +329,32 @@ async function completeTask({ taskPageOrMain, pageMain, context, bus, cfg, taskL
 }
 
 async function findTaskCandidates(page, cfg) {
-  // Very generic: collect clickable elements that likely correspond to tasks.
-  // Microworkers may vary, so this is best-effort only.
-  const locator = page
-    .locator("a, button")
-    .filter({ hasText: /start|begin|work|do task|open/i });
+  const onMw = /microworkers\.com/i.test(page.url());
+  const actionRe = onMw
+    ? /accept|apply|participate|select(\s+job|\s+task)?|view(\s+job|\s+task|\s+details|\s+campaign)?|start|begin|take(\s+job|\s+task)?|open(\s+job)?|details|continue|submit(\s+proof)?|get\s+started|i\s+will|i\s+want|work\s+now/i
+    : /start|begin|work|do task|open/i;
 
-  const count = await locator.count();
+  let taskClickLocator = page
+    .locator(".maincontent")
+    .first()
+    .locator("a, button, input[type='submit'], input[type='button']")
+    .filter({ hasText: actionRe });
+
+  let count = await taskClickLocator.count();
+  if (count === 0 && onMw) {
+    taskClickLocator = page
+      .locator("a, button, input[type='submit'], input[type='button']")
+      .filter({ hasText: actionRe });
+    count = await taskClickLocator.count();
+  }
+
   const max = Math.min(cfg.MAX_TASKS_PER_RUN, count);
   const candidates = [];
   for (let i = 0; i < max; i++) {
-    const el = locator.nth(i);
+    const el = taskClickLocator.nth(i);
     const info = await el.evaluate((node) => {
-      const parent = node.closest("article, li, div") || node.parentElement || node;
+      const parent =
+        node.closest("article, li, tr, table tbody tr, .job, .campaign, .joblist, div") || node.parentElement || node;
       const txt = parent ? parent.innerText : node.innerText;
       return {
         text: (txt || "").slice(0, 2000),
@@ -331,7 +363,7 @@ async function findTaskCandidates(page, cfg) {
     });
     candidates.push({ index: i, ...info });
   }
-  return candidates;
+  return { candidates, taskClickLocator };
 }
 
 async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
@@ -410,6 +442,15 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
       }
     }
 
+    if (await detectLoggedIn(page)) {
+      try {
+        await context.storageState({ path: storageStatePath });
+        emit(bus, { type: "SESSION_SAVED", label: "Saved login cookies for next deploy/run" });
+      } catch (err) {
+        emit(bus, { type: "SESSION_SAVE_WARN", label: trimText(String(err?.message || err), 200) });
+      }
+    }
+
     // Try to reach tasks list.
     emit(bus, { type: "NAVIGATE", label: "Going to tasks page" });
     const taskUrls = [];
@@ -417,6 +458,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
       const base = b.replace(/\/$/, "");
       taskUrls.push(
         `${base}/jobs.php`,
+        `${base}/worker_start.php`,
         `${base}/campaigns.php`,
         `${base}/tasks`,
         `${base}/task`,
@@ -427,9 +469,12 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
       try {
         await page.goto(url, { waitUntil: "domcontentloaded" });
         await trySolveCaptchasOnPage(page, cfg, bus, "tasks page");
-        const t = await pageText(page);
-        if (/\b(task|available|earn|work)\b/i.test(t)) {
+        const mwJobs = await isLikelyMicroworkersTaskListing(page);
+        const genericNonMw =
+          !/microworkers\.com/i.test(page.url()) && /\b(task|available|earn|work)\b/i.test(await pageText(page));
+        if (mwJobs || genericNonMw) {
           tasksLoaded = true;
+          emit(bus, { type: "TASKS_PAGE_OK", label: `Using ${page.url()}` });
           break;
         }
       } catch {
@@ -453,14 +498,23 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
               // ignore
             }
           }
-          if (await pageText(page).then((t) => /\b(task|available|earn|work)\b/i.test(t))) break;
+          if (await isLikelyMicroworkersTaskListing(page)) break;
+          if (!/microworkers\.com/i.test(page.url()) && /\b(task|available|earn|work)\b/i.test(await pageText(page))) break;
           emit(bus, { type: "TASKS_RECHECK", label: `Recheck tasks list attempt ${i + 1}/5` });
         }
       }
     }
 
-    const candidates = await findTaskCandidates(page, cfg);
+    const { candidates, taskClickLocator } = await findTaskCandidates(page, cfg);
     emit(bus, { type: "TASK_QUEUE", label: `Found ${candidates.length} task candidates` });
+    if (candidates.length === 0) {
+      await emitPageDiagnostics(bus, page, "no task candidates");
+      emit(bus, {
+        type: "TASKS_EMPTY",
+        label:
+          "No task action links matched (Accept/Apply/View job/…). Check Live browser on jobs.php — we may need to adjust selectors for your account layout.",
+      });
+    }
 
     let completed = 0;
     let skippedPhone = 0;
@@ -494,7 +548,7 @@ async function runMicroworkersAutomation({ bus, manualGate, cfg }) {
       }
 
       // Click the candidate and capture a potential popup.
-      const locator = page.locator("a, button").filter({ hasText: /start|begin|work|do task|open/i }).nth(cand.index);
+      const locator = taskClickLocator.nth(cand.index);
       const taskLabel = trimText(summaryText || "Task", 120);
 
       emit(bus, { type: "TASK_START_ATTEMPT", label: taskLabel });
