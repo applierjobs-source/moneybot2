@@ -3,7 +3,12 @@ const path = require("path");
 const { chromium } = require("playwright");
 
 const { textLooksLikePhoneTask, formLooksLikePhoneTask } = require("./phoneFilter");
-const { clickIfExists, trimText, safeGetInnerText } = require("../utils/playwrightHelpers");
+const {
+  clickIfExists,
+  trimText,
+  safeGetInnerText,
+  DEFAULT_TASK_UI_EXCLUDE,
+} = require("../utils/playwrightHelpers");
 const { classifyTaskForPhoneRequirement } = require("../openai/classifier");
 const { runOpenAINavigatorJobLoop } = require("../openai/navigator");
 const { trySolveCaptchasOnPage } = require("../capsolver/trySolve");
@@ -328,15 +333,16 @@ function findTaskCompletionMatch(body, { afterProgressClicks }) {
 }
 
 async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
+  // Use \\b (and avoid bare "finish"/"start") so we don't match "Tasks I finished", "Get started" nav, etc.
   const actionPriority = [
-    /continue|next|proceed|go\s+to\s+next|move\s+on/i,
-    /start|begin|get\s+started|launch|open\s+task|work\s+on\s+this/i,
-    /i\s+agree|agree|accept(\s+job|\s+task|\s+and)?|accept\s+terms/i,
+    /\bcontinue\b|\bnext\b|proceed|go\s+to\s+next|move\s+on/i,
+    /\bstart\b|\bbegin\b|get\s+started|launch|open\s+task|work\s+on\s+this/i,
+    /\bi\s+agree\b|(?<![a-z])agree\b(?=\s+to|\s+with|\s+and)|accept(\s+job|\s+task|\s+and)?|accept\s+terms/i,
     /submit(\s+proof|\s+task|\s+work)?|send\s+proof|upload\s+proof|post\s+proof/i,
-    /finish|mark\s+as\s+done|i\s+completed|task\s+complete|job\s+complete/i,
-    /confirm|verify(\s+and)?\s+continue|yes,?\s*i\s+confirm/i,
-    /apply|participate|i\s+confirm|take\s+this\s+job|join(\s+now)?/i,
-    /rate|stars?|thumbs?\s+up/i,
+    /\bmark\s+as\s+done\b|\bi\s+completed\b|\btask\s+complete\b|\bjob\s+complete\b|\bfinish\b/i,
+    /\bconfirm\b|verify(\s+and)?\s+continue|yes,?\s*i\s+confirm/i,
+    /\bapply\b|participate|i\s+confirm|take\s+this\s+job|join(\s+now)?/i,
+    /\brate\b|stars?|thumbs?\s+up/i,
     /visit\s+(website|site|link)|open\s+link|go\s+to\s+website|click\s+here\s+to\s+start/i,
     /\bok\b|\bokay\b|got\s+it|understood/i,
     /save(\s+and)?\s+continue|done\s+with\s+step/i,
@@ -378,6 +384,7 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
           textRegex: re,
           timeoutMs: 1400,
           actionName: "TASK_ACTION",
+          excludeLabelRe: DEFAULT_TASK_UI_EXCLUDE,
         });
         if (res.clicked) {
           clickedAny = true;
@@ -393,17 +400,22 @@ async function clickContinueLoop({ page, bus, cfg, taskLabel }) {
       for (const root of framesNow) {
         for (const re of actionPriority) {
           const tryRole = async (role) => {
-            const loc = root.getByRole(role, { name: re }).first();
-            if ((await loc.count()) === 0) return false;
-            try {
-              await loc.waitFor({ state: "visible", timeout: 1200 });
+            const group = root.getByRole(role, { name: re });
+            const n = await group.count();
+            for (let i = 0; i < n; i++) {
+              const loc = group.nth(i);
+              try {
+                await loc.waitFor({ state: "visible", timeout: 1200 });
+              } catch {
+                continue;
+              }
               const label = await safeGetInnerText(loc);
+              if (DEFAULT_TASK_UI_EXCLUDE.test(label)) continue;
               emit(bus, { type: "TASK_ACTION", label: trimText(label, 120), textRegex: String(re) });
               await loc.click({ timeout: 1200 });
               return true;
-            } catch {
-              return false;
             }
+            return false;
           };
           if (await tryRole("button")) {
             clickedAny = true;
